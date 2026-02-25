@@ -5,7 +5,7 @@ from pwn import *
 {bindings}
 
 context.binary = {bin_name}
-context.terminal = "kitty"
+context.terminal = ["zellij", "action", "new-pane", "--"]
 context.gdb_binary = "/usr/bin/pwndbg"
 
 gdbscript = """
@@ -20,6 +20,7 @@ def conn():
         r = process({proc_args})
         if args.GDB:
             gdb.attach(r, gdbscript=gdbscript)
+            pause()
     else:
         r = remote("addr", 1337)
 
