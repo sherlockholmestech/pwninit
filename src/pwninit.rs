@@ -53,7 +53,7 @@ pub fn run(opts: Opts) -> Result {
 
     set_ld_exec(&opts).context(SetLdExecSnafu)?;
 
-    if !opts.no_uv {
+    if opts.uv {
         uv_venv::ensure_uv_venv().context(UvVenvSnafu)?;
     }
 

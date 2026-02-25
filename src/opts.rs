@@ -71,9 +71,9 @@ pub struct Opts {
     #[structopt(default_value = "ld")]
     pub template_ld_name: String,
 
-    /// Disable creating a uv virtual environment with pwntools
+    /// Create a uv virtual environment with pwntools
     #[structopt(long)]
-    pub no_uv: bool,
+    pub uv: bool,
 
     /// Disable running patchelf on binary
     #[structopt(long)]

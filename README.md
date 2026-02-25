@@ -27,7 +27,7 @@ Run `pwninit`
 
 Run `pwninit` in a directory with the relevant files and it will detect which ones are the binary, libc, and linker. If the detection is wrong, you can specify the locations with `--bin`, `--libc`, and `--ld`.
 
-By default, `pwninit` creates a local `uv` virtual environment in `.venv` and installs `pwntools`. Use `--no-uv` to disable this behavior.
+Use `--uv` to create a local `uv` virtual environment in `.venv` and install `pwntools`. By default, no virtual environment is created.
 
 #### Custom `solve.py` template
 
