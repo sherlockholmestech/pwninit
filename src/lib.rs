@@ -11,6 +11,7 @@ mod pwninit;
 mod set_exec;
 mod solvepy;
 mod unstrip_libc;
+mod uv_venv;
 mod warn;
 
 pub use crate::pwninit::run;

@@ -5,6 +5,8 @@ from pwn import *
 {bindings}
 
 context.binary = {bin_name}
+context.terminal = "kitty"
+context.gdb_binary = "/usr/bin/pwndbg"
 
 
 def conn():

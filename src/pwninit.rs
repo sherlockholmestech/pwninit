@@ -4,6 +4,7 @@ use crate::patch_bin;
 use crate::set_bin_exec;
 use crate::set_ld_exec;
 use crate::solvepy;
+use crate::uv_venv;
 use crate::Opts;
 
 use ex::io;
@@ -25,6 +26,9 @@ pub enum Error {
 
     #[snafu(display("failed patching binary: {}", source))]
     PatchBin { source: patch_bin::Error },
+
+    #[snafu(display("failed setting up uv virtual environment: {}", source))]
+    UvVenv { source: uv_venv::Error },
 
     #[snafu(display("failed making template solve script: {}", source))]
     Solvepy { source: solvepy::Error },
@@ -48,6 +52,10 @@ pub fn run(opts: Opts) -> Result {
     let opts = opts.find_if_unspec().context(FindSnafu)?;
 
     set_ld_exec(&opts).context(SetLdExecSnafu)?;
+
+    if !opts.no_uv {
+        uv_venv::ensure_uv_venv().context(UvVenvSnafu)?;
+    }
 
     if !opts.no_patch_bin {
         patch_bin::patch_bin(&opts).context(PatchBinSnafu)?;
