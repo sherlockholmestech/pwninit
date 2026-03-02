@@ -50,7 +50,7 @@ pub fn run(opts: Opts) -> Result {
             set_bin_exec_rev(&rev_opts).context(SetBinExecSnafu)?;
 
             if rev_opts.uv {
-                uv_venv::ensure_uv_venv(&["angr", "z3-solver"]).context(UvVenvSnafu)?;
+                uv_venv::ensure_uv_venv(&["angr[unicorn]", "z3-solver"]).context(UvVenvSnafu)?;
             }
 
             if !rev_opts.no_template {
