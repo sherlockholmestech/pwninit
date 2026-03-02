@@ -5,7 +5,8 @@
 
 # `pwninit`
 
-A tool for automating starting binary exploit challenges
+A tool for automating starting binary exploit challenges, as well as reverse engineering ones.
+
 
 ## Features
 
