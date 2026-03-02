@@ -9,30 +9,17 @@ import z3
 
 def main():
     project = angr.Project({bin_name}, auto_load_libs=False)
-
-    input_len = 32
-    sym_input = claripy.BVS("sym_input", input_len * 8)
-    state = project.factory.full_init_state(stdin=sym_input)
-
-    for i in range(input_len):
-        byte = sym_input.get_byte(i)
-        state.solver.add(byte >= 0x20)
-        state.solver.add(byte <= 0x7E)
-
+    state = project.factory.entry_state()
     simgr = project.factory.simgr(state)
 
+    # Customize these for your target
     find_addr = None
     avoid_addr = None
 
-    if find_addr is not None:
-        simgr.explore(find=find_addr, avoid=avoid_addr)
-    else:
-        simgr.explore()
+    simgr.explore(find=find_addr, avoid=avoid_addr)
 
     if simgr.found:
-        found = simgr.found[0]
-        solution = found.solver.eval(sym_input, cast_to=bytes)
-        print(solution)
+        print("found a solution state")
     else:
         print("no solution found")
 
