@@ -20,14 +20,14 @@ pub use crate::pwninit::Result;
 use crate::elf::detect::is_elf;
 pub use crate::fetch_ld::fetch_ld;
 use crate::libc_version::LibcVersion;
-use crate::opts::Opts;
+use crate::opts::{PwnOpts, RevOpts};
 pub use crate::set_exec::set_exec;
 pub use crate::unstrip_libc::unstrip_libc;
 use crate::warn::Warn;
 use crate::warn::WarnResult;
 
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 use ex::io;
@@ -58,7 +58,7 @@ pub fn is_ld(path: &Path) -> elf::detect::Result<bool> {
 
 /// Same as `fetch_ld()`, but doesn't do anything if an existing linker is
 /// detected
-fn maybe_fetch_ld(opts: &Opts, ver: &LibcVersion) -> fetch_ld::Result {
+fn maybe_fetch_ld(opts: &PwnOpts, ver: &LibcVersion) -> fetch_ld::Result {
     match opts.ld {
         Some(_) => Ok(()),
         None => fetch_ld(ver),
@@ -68,7 +68,7 @@ fn maybe_fetch_ld(opts: &Opts, ver: &LibcVersion) -> fetch_ld::Result {
 /// Top-level function for libc-dependent tasks
 ///   1. Download linker if not found
 ///   2. Unstrip libc if libc is stripped
-fn visit_libc(opts: &Opts, libc: &Path) {
+fn visit_libc(opts: &PwnOpts, libc: &Path) {
     let ver = match LibcVersion::detect(libc) {
         Ok(ver) => ver,
         Err(err) => {
@@ -81,15 +81,15 @@ fn visit_libc(opts: &Opts, libc: &Path) {
 }
 
 /// Same as `visit_libc()`, but doesn't do anything if no libc is found
-pub fn maybe_visit_libc(opts: &Opts) {
+pub fn maybe_visit_libc(opts: &PwnOpts) {
     if let Some(libc) = &opts.libc {
         visit_libc(opts, libc)
     }
 }
 
 /// Set the binary executable
-pub fn set_bin_exec(opts: &Opts) -> io::Result<()> {
-    match &opts.bin {
+fn set_bin_exec_inner(bin: &Option<PathBuf>) -> io::Result<()> {
+    match bin {
         Some(bin) => {
             if !bin.is_executable() {
                 println!(
@@ -105,8 +105,18 @@ pub fn set_bin_exec(opts: &Opts) -> io::Result<()> {
     Ok(())
 }
 
+/// Set the binary executable (pwn)
+pub fn set_bin_exec_pwn(opts: &PwnOpts) -> io::Result<()> {
+    set_bin_exec_inner(&opts.bin)
+}
+
+/// Set the binary executable (rev)
+pub fn set_bin_exec_rev(opts: &RevOpts) -> io::Result<()> {
+    set_bin_exec_inner(&opts.bin)
+}
+
 /// Set the detected linker executable
-pub fn set_ld_exec(opts: &Opts) -> io::Result<()> {
+pub fn set_ld_exec(opts: &PwnOpts) -> io::Result<()> {
     match &opts.ld {
         Some(ld) if !ld.is_executable() => {
             println!(

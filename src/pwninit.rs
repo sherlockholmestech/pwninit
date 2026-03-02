@@ -1,11 +1,11 @@
 use crate::maybe_visit_libc;
-use crate::opts;
+use crate::opts::{self, Command, Opts};
 use crate::patch_bin;
-use crate::set_bin_exec;
+use crate::set_bin_exec_pwn;
+use crate::set_bin_exec_rev;
 use crate::set_ld_exec;
 use crate::solvepy;
 use crate::uv_venv;
-use crate::Opts;
 
 use ex::io;
 use snafu::ResultExt;
@@ -45,24 +45,47 @@ pub fn run(opts: Opts) -> Result {
     opts.print();
     println!();
 
-    set_bin_exec(&opts).context(SetBinExecSnafu)?;
-    maybe_visit_libc(&opts);
+    match opts.cmd {
+        Some(Command::Rev(rev_opts)) => {
+            set_bin_exec_rev(&rev_opts).context(SetBinExecSnafu)?;
 
-    // Redo detection in case the ld was downloaded
-    let opts = opts.find_if_unspec().context(FindSnafu)?;
+            if rev_opts.uv {
+                uv_venv::ensure_uv_venv(&["angr", "z3-solver"]).context(UvVenvSnafu)?;
+            }
 
-    set_ld_exec(&opts).context(SetLdExecSnafu)?;
+            if !rev_opts.no_template {
+                solvepy::write_stub_rev(&rev_opts).context(SolvepySnafu)?;
+            }
+        }
+        None => {
+            let pwn_opts = opts.pwn;
+            set_bin_exec_pwn(&pwn_opts).context(SetBinExecSnafu)?;
+            maybe_visit_libc(&pwn_opts);
 
-    if opts.uv {
-        uv_venv::ensure_uv_venv().context(UvVenvSnafu)?;
-    }
+            // Redo detection in case the ld was downloaded
+            let opts = Opts {
+                pwn: pwn_opts,
+                cmd: None,
+            }
+            .find_if_unspec()
+            .context(FindSnafu)?;
 
-    if !opts.no_patch_bin {
-        patch_bin::patch_bin(&opts).context(PatchBinSnafu)?;
-    }
+            let pwn_opts = opts.pwn;
 
-    if !opts.no_template {
-        solvepy::write_stub(&opts).context(SolvepySnafu)?;
+            set_ld_exec(&pwn_opts).context(SetLdExecSnafu)?;
+
+            if pwn_opts.uv {
+                uv_venv::ensure_uv_venv(&["pwntools"]).context(UvVenvSnafu)?;
+            }
+
+            if !pwn_opts.no_patch_bin {
+                patch_bin::patch_bin(&pwn_opts).context(PatchBinSnafu)?;
+            }
+
+            if !pwn_opts.no_template {
+                solvepy::write_stub_pwn(&pwn_opts).context(SolvepySnafu)?;
+            }
+        }
     }
 
     Ok(())

@@ -1,4 +1,4 @@
-use crate::opts::Opts;
+use crate::opts::PwnOpts;
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -46,7 +46,7 @@ const LIBC_FILE_NAME: &str = "libc.so.6";
 /// If `opts` has a linker, make it the interpreter of the binary.
 ///
 /// Run `patchelf` once per option to avoid broken offsets/symbols (#297)
-fn run_patchelf(bin: &Path, opts: &Opts) -> Result<()> {
+fn run_patchelf(bin: &Path, opts: &PwnOpts) -> Result<()> {
     println!(
         "{}",
         format!("running patchelf on {}", bin.to_string_lossy().bold()).green()
@@ -124,7 +124,7 @@ fn bin_patched_path_from_bin(bin: &Path) -> Result<PathBuf> {
 }
 
 /// Add "_patched" to the end of the binary file name if the binary got patched.
-pub fn bin_patched_path(opts: &Opts) -> Option<PathBuf> {
+pub fn bin_patched_path(opts: &PwnOpts) -> Option<PathBuf> {
     match opts.no_patch_bin {
         true => None,
         false => opts
@@ -157,7 +157,7 @@ fn copy_patched(bin: &Path) -> Result<PathBuf> {
 /// Specifically, symlink "libc.so.6" to the libc,
 /// copy the binary,
 /// and run patchelf on the copied binary.
-pub fn patch_bin(opts: &Opts) -> Result<()> {
+pub fn patch_bin(opts: &PwnOpts) -> Result<()> {
     if let Some(bin) = &opts.bin {
         if let Some(libc) = &opts.libc {
             symlink_libc(libc)?;

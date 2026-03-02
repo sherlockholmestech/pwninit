@@ -34,9 +34,9 @@ fn run_uv(args: &[&str]) -> Result<()> {
     }
 }
 
-/// Ensure a local uv virtual environment exists and has pwntools installed.
+/// Ensure a local uv virtual environment exists and has required packages installed.
 /// This creates `.venv` if it does not already exist.
-pub fn ensure_uv_venv() -> Result {
+pub fn ensure_uv_venv(packages: &[&str]) -> Result {
     let venv_path = Path::new(".venv");
     if !venv_path.exists() {
         println!("{}", "creating uv virtual environment".cyan().bold());
@@ -49,6 +49,8 @@ pub fn ensure_uv_venv() -> Result {
         }
     }
 
-    println!("{}", "installing pwntools with uv".cyan().bold());
-    run_uv(&["pip", "install", "--python", ".venv/bin/python", "pwntools"])
+    println!("{}", "installing packages with uv".cyan().bold());
+    let mut args = vec!["pip", "install", "--python", ".venv/bin/python"];
+    args.extend_from_slice(packages);
+    run_uv(&args)
 }

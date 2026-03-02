@@ -1,4 +1,4 @@
-use crate::opts::Opts;
+use crate::opts::{PwnOpts, RevOpts};
 use crate::patch_bin;
 use crate::set_exec;
 
@@ -36,7 +36,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Make pwntools script that binds the (binary, libc, linker) to `ELF`
 /// variables
-fn make_bindings(opts: &Opts) -> String {
+fn make_bindings_pwn(opts: &PwnOpts) -> String {
     // Helper to make one binding line
     fn bind_line<P: AsRef<Path>>(name: &str, opt_path: Option<P>) -> Option<String> {
         opt_path
@@ -62,13 +62,30 @@ fn make_bindings(opts: &Opts) -> String {
     .join("\n")
 }
 
+/// Make angr script that binds the binary path for analysis
+fn make_bindings_rev(opts: &RevOpts) -> String {
+    // Helper to make one binding line
+    fn bind_line<P: AsRef<Path>>(name: &str, opt_path: Option<P>) -> Option<String> {
+        opt_path
+            .as_ref()
+            .map(|path| format!("{} = \"{}\"", name, path.as_ref().display(),))
+    }
+
+    [bind_line(&opts.template_bin_name, opts.bin.as_ref())]
+        .iter()
+        .filter_map(|x| x.as_ref())
+        .cloned()
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
 /// Make arguments to pwntools `process()` function
-fn make_proc_args(opts: &Opts) -> String {
+fn make_proc_args_pwn(opts: &PwnOpts) -> String {
     format!("[{}.path]", opts.template_bin_name)
 }
 
 /// Fill in template pwntools solve script with (binary, libc, linker) paths
-fn make_stub(opts: &Opts) -> Result<String> {
+fn make_stub_pwn(opts: &PwnOpts) -> Result<String> {
     let templ = match &opts.template_path {
         Some(path) => {
             let data = fs::read(path).context(ReadSnafu)?;
@@ -79,18 +96,50 @@ fn make_stub(opts: &Opts) -> Result<String> {
     strfmt(
         &templ,
         &hashmap! {
-        "bindings".to_string() => make_bindings(opts),
-        "proc_args".to_string() => make_proc_args(opts),
+        "bindings".to_string() => make_bindings_pwn(opts),
+        "proc_args".to_string() => make_proc_args_pwn(opts),
         "bin_name".to_string() => opts.template_bin_name.clone(),
         },
     )
     .context(FmtSnafu)
 }
 
-/// Write script produced with `make_stub()` to `solve.py` in the
+/// Fill in template angr solve script with binary path
+fn make_stub_rev(opts: &RevOpts) -> Result<String> {
+    let templ = match &opts.template_path {
+        Some(path) => {
+            let data = fs::read(path).context(ReadSnafu)?;
+            String::from_utf8(data).context(Utf8Snafu)?
+        }
+        None => include_str!("template_rev.py").to_string(),
+    };
+    strfmt(
+        &templ,
+        &hashmap! {
+        "bindings".to_string() => make_bindings_rev(opts),
+        "bin_name".to_string() => opts.template_bin_name.clone(),
+        },
+    )
+    .context(FmtSnafu)
+}
+
+/// Write script produced with `make_stub_pwn()` to `solve.py` in the
 /// specified directory, unless a `solve.py` already exists
-pub fn write_stub(opts: &Opts) -> Result<()> {
-    let stub = make_stub(opts)?;
+pub fn write_stub_pwn(opts: &PwnOpts) -> Result<()> {
+    let stub = make_stub_pwn(opts)?;
+    let path = Path::new("solve.py");
+    if !path.exists() {
+        println!("{}", "writing solve.py stub".cyan().bold());
+        fs::write(path, stub).context(WriteSnafu)?;
+        set_exec(path).context(SetExecSnafu)?;
+    }
+    Ok(())
+}
+
+/// Write script produced with `make_stub_rev()` to `solve.py` in the
+/// specified directory, unless a `solve.py` already exists
+pub fn write_stub_rev(opts: &RevOpts) -> Result<()> {
+    let stub = make_stub_rev(opts)?;
     let path = Path::new("solve.py");
     if !path.exists() {
         println!("{}", "writing solve.py stub".cyan().bold());

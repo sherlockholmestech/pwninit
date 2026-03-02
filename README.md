@@ -15,7 +15,8 @@ A tool for automating starting binary exploit challenges
 - Patch the binary with [`patchelf`](https://github.com/NixOS/patchelf) to use
   the correct RPATH and interpreter for the provided libc
 - Fill in a template pwntools solve script
-- Create a local `uv` virtual environment in `.venv` and install `pwntools`
+- Fill in a template angr + z3 solve script for rev challenges
+- Create a local `uv` virtual environment in `.venv` and install `pwntools` (pwn) or `angr` + `z3-solver` (rev)
 
 ## Usage
 
@@ -27,7 +28,9 @@ Run `pwninit`
 
 Run `pwninit` in a directory with the relevant files and it will detect which ones are the binary, libc, and linker. If the detection is wrong, you can specify the locations with `--bin`, `--libc`, and `--ld`.
 
-Use `--uv` to create a local `uv` virtual environment in `.venv` and install `pwntools`. By default, no virtual environment is created.
+Run `pwninit rev` in a directory with the relevant files and it will detect the reverse engineering binary. If the detection is wrong, you can specify the location with `--bin`.
+
+Use `--uv` to create a local `uv` virtual environment in `.venv` and install `pwntools` for pwn challenges or `angr` + `z3-solver` for rev challenges. By default, no virtual environment is created.
 
 #### Custom `solve.py` template
 
