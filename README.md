@@ -48,26 +48,13 @@ alias pwninit='pwninit --template-path ~/.config/pwninit-template.py --template-
 ```
 
 ## Install
-
-### Arch Linux
-
-Install [`pwninit`](https://aur.archlinux.org/packages/pwninit/) or
-[`pwninit-bin`](https://aur.archlinux.org/packages/pwninit-bin/) from the AUR.
-
-### Download
-
-You can download statically-linked [musl](https://www.musl-libc.org/)
-binaries from the [releases page](https://github.com/io12/pwninit/releases).
-
-### Using cargo
-
 Run
 
 ```sh
-cargo install pwninit
+cargo build --release
 ```
 
-This places the binary in `~/.cargo/bin`.
+To build the binary in the target/release folder.
 
 Note that `openssl`, `liblzma`, and `pkg-config` are required for the build.
 
@@ -93,41 +80,4 @@ writing solve.py stub
 
 $ ls
 hunter	hunter_patched	ld-2.23.so  libc.so.6  readme  solve.py
-```
-
-`solve.py`:
-
-```python
-#!/usr/bin/env python3
-
-from pwn import *
-
-exe = ELF("./hunter_patched")
-libc = ELF("./libc.so.6")
-ld = ELF("./ld-2.23.so")
-
-context.binary = exe
-
-
-def conn():
-    if args.LOCAL:
-        r = process([exe.path])
-        if args.GDB:
-            gdb.attach(r)
-    else:
-        r = remote("addr", 1337)
-
-    return r
-
-
-def main():
-    r = conn()
-
-    # good luck pwning :)
-
-    r.interactive()
-
-
-if __name__ == "__main__":
-    main()
 ```
