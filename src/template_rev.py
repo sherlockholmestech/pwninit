@@ -19,7 +19,9 @@ def main():
     simgr.explore(find=find_addr, avoid=avoid_addr)
 
     if simgr.found:
-        print("found a solution state")
+        found_state = simgr.found[0]
+        solution = found_state.solver.eval(flag, cast_to=bytes)
+        print(f"found a solution: {solution}")
     else:
         print("no solution found")
 
