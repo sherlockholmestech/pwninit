@@ -21,7 +21,7 @@ def main():
     if simgr.found:
         found_state = simgr.found[0]
         solution = found_state.solver.eval(flag, cast_to=bytes)
-        print(f"found a solution: {solution}")
+        print("found a solution: " + solution)
     else:
         print("no solution found")
 
