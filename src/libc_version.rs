@@ -56,6 +56,22 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl LibcVersion {
+    /// Construct a `LibcVersion` directly from a version string and architecture
+    ///
+    /// `version` should be the long form, e.g. `"2.31-0ubuntu9.9"`.
+    pub fn from_parts(version: String, arch: CpuArch) -> Result<Self> {
+        let string_short = version
+            .split('-')
+            .next()
+            .context(NotFoundSnafu)?
+            .to_string();
+        Ok(Self {
+            string: version,
+            string_short,
+            arch,
+        })
+    }
+
     /// Detect the version of a libc
     pub fn detect(libc: &Path) -> Result<Self> {
         let bytes = fs::read(libc).context(ReadSnafu)?;

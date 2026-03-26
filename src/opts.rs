@@ -1,5 +1,6 @@
 //! Command-line option handling
 
+use crate::cpu_arch::CpuArch;
 use crate::elf;
 use crate::is_bin;
 use crate::is_ld;
@@ -48,6 +49,9 @@ pub struct Opts {
 pub enum Command {
     /// Reverse engineering challenge
     Rev(RevOpts),
+
+    /// Download a libc by version without a local libc file
+    FetchLibc(FetchLibcOpts),
 }
 
 /// Options for pwn challenge initialization
@@ -132,6 +136,22 @@ pub struct RevOpts {
     pub no_template: bool,
 }
 
+/// Options for downloading a libc by version
+#[derive(StructOpt, Clone)]
+pub struct FetchLibcOpts {
+    /// Short glibc version to search for, e.g. "2.31"
+    #[structopt(long)]
+    pub version: String,
+
+    /// Target architecture: "amd64" (default) or "i386"
+    #[structopt(long, default_value = "amd64")]
+    pub arch: CpuArch,
+
+    /// Output path for the downloaded libc (default: "libc.so.6")
+    #[structopt(long, default_value = "libc.so.6")]
+    pub output: PathBuf,
+}
+
 impl Default for PwnOpts {
     fn default() -> Self {
         Self {
@@ -178,6 +198,7 @@ impl Opts {
             Some(Command::Rev(opts)) => {
                 f(&opts.bin, "bin", Color::BrightBlue);
             }
+            Some(Command::FetchLibc(_)) => {}
             None => {
                 f(&self.pwn.bin, "bin", Color::BrightBlue);
                 f(&self.pwn.libc, "libc", Color::Yellow);
@@ -197,6 +218,10 @@ impl Opts {
                     cmd: Some(Command::Rev(opts)),
                 })
             }
+            Some(Command::FetchLibc(opts)) => Ok(Opts {
+                pwn: self.pwn,
+                cmd: Some(Command::FetchLibc(opts)),
+            }),
             None => {
                 let mut dir = fs::read_dir(".").context(ReadDirSnafu)?;
                 let pwn = dir.try_fold(self.pwn, PwnOpts::merge_result_entry)?;

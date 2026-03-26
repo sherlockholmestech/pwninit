@@ -3,7 +3,9 @@
 mod cpu_arch;
 mod elf;
 mod fetch_ld;
+mod fetch_libc;
 mod libc_deb;
+mod libc_search;
 mod libc_version;
 pub mod opts;
 mod patch_bin;
@@ -19,6 +21,7 @@ pub use crate::pwninit::Result;
 
 use crate::elf::detect::is_elf;
 pub use crate::fetch_ld::fetch_ld;
+pub use crate::fetch_libc::fetch_libc;
 use crate::libc_version::LibcVersion;
 use crate::opts::{PwnOpts, RevOpts};
 pub use crate::set_exec::set_exec;
