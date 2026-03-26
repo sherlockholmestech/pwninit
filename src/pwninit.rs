@@ -1,3 +1,4 @@
+use crate::fetch_libc;
 use crate::maybe_visit_libc;
 use crate::opts::{self, Command, Opts};
 use crate::patch_bin;
@@ -32,6 +33,9 @@ pub enum Error {
 
     #[snafu(display("failed making template solve script: {}", source))]
     Solvepy { source: solvepy::Error },
+
+    #[snafu(display("failed downloading libc: {}", source))]
+    FetchLibc { source: fetch_libc::Error },
 }
 
 pub type Result = std::result::Result<(), Error>;
@@ -46,6 +50,14 @@ pub fn run(opts: Opts) -> Result {
     println!();
 
     match opts.cmd {
+        Some(Command::FetchLibc(fetch_opts)) => {
+            fetch_libc::fetch_libc_interactive(
+                &fetch_opts.version,
+                fetch_opts.arch,
+                &fetch_opts.output,
+            )
+            .context(FetchLibcSnafu)?;
+        }
         Some(Command::Rev(rev_opts)) => {
             set_bin_exec_rev(&rev_opts).context(SetBinExecSnafu)?;
 
