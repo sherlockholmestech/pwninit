@@ -7,8 +7,7 @@ use serde::Deserialize;
 use snafu::ResultExt;
 use snafu::Snafu;
 
-const LAUNCHPAD_API: &str =
-    "https://api.launchpad.net/1.0/ubuntu/+archive/primary\
+const LAUNCHPAD_API: &str = "https://api.launchpad.net/1.0/ubuntu/+archive/primary\
      ?ws.op=getPublishedBinaries\
      &binary_name=libc6\
      &exact_match=true\
@@ -44,9 +43,12 @@ struct Entry {
 pub fn search_versions(short_version: &str, arch: &CpuArch) -> Result<Vec<String>> {
     println!(
         "{}",
-        format!("searching Launchpad for libc6 {}* ({})", short_version, arch)
-            .cyan()
-            .bold()
+        format!(
+            "searching Launchpad for libc6 {}* ({})",
+            short_version, arch
+        )
+        .cyan()
+        .bold()
     );
 
     let arch_str = arch.to_string();
@@ -62,7 +64,10 @@ pub fn search_versions(short_version: &str, arch: &CpuArch) -> Result<Vec<String
 
         for entry in page.entries {
             // Filter by architecture: the distro_arch_series_link ends with the arch name
-            if !entry.distro_arch_series_link.ends_with(&format!("/{}", arch_str)) {
+            if !entry
+                .distro_arch_series_link
+                .ends_with(&format!("/{}", arch_str))
+            {
                 continue;
             }
             // Filter by version prefix

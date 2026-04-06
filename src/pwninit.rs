@@ -40,6 +40,55 @@ pub enum Error {
 
 pub type Result = std::result::Result<(), Error>;
 
+fn run_fetch_libc(fetch_opts: crate::opts::FetchLibcOpts) -> Result {
+    fetch_libc::fetch_libc_interactive(&fetch_opts.version, fetch_opts.arch, &fetch_opts.output)
+        .context(FetchLibcSnafu)
+}
+
+fn run_rev_flow(rev_opts: crate::opts::RevOpts) -> Result {
+    set_bin_exec_rev(&rev_opts).context(SetBinExecSnafu)?;
+
+    if rev_opts.uv {
+        uv_venv::ensure_uv_venv(&["angr[unicorn]", "z3-solver"]).context(UvVenvSnafu)?;
+    }
+
+    if !rev_opts.no_template {
+        solvepy::write_stub_rev(&rev_opts).context(SolvepySnafu)?;
+    }
+
+    Ok(())
+}
+
+fn run_pwn_flow(mut pwn_opts: crate::opts::PwnOpts) -> Result {
+    set_bin_exec_pwn(&pwn_opts).context(SetBinExecSnafu)?;
+    maybe_visit_libc(&pwn_opts);
+
+    // Redo detection in case the ld was downloaded.
+    pwn_opts = Opts {
+        pwn: pwn_opts,
+        cmd: None,
+    }
+    .find_if_unspec()
+    .context(FindSnafu)?
+    .pwn;
+
+    set_ld_exec(&pwn_opts).context(SetLdExecSnafu)?;
+
+    if pwn_opts.uv {
+        uv_venv::ensure_uv_venv(&["pwntools"]).context(UvVenvSnafu)?;
+    }
+
+    if !pwn_opts.no_patch_bin {
+        patch_bin::patch_bin(&pwn_opts).context(PatchBinSnafu)?;
+    }
+
+    if !pwn_opts.no_template {
+        solvepy::write_stub_pwn(&pwn_opts).context(SolvepySnafu)?;
+    }
+
+    Ok(())
+}
+
 /// Run `pwninit` with specified options
 pub fn run(opts: Opts) -> Result {
     // Detect unspecified files
@@ -50,55 +99,8 @@ pub fn run(opts: Opts) -> Result {
     println!();
 
     match opts.cmd {
-        Some(Command::FetchLibc(fetch_opts)) => {
-            fetch_libc::fetch_libc_interactive(
-                &fetch_opts.version,
-                fetch_opts.arch,
-                &fetch_opts.output,
-            )
-            .context(FetchLibcSnafu)?;
-        }
-        Some(Command::Rev(rev_opts)) => {
-            set_bin_exec_rev(&rev_opts).context(SetBinExecSnafu)?;
-
-            if rev_opts.uv {
-                uv_venv::ensure_uv_venv(&["angr[unicorn]", "z3-solver"]).context(UvVenvSnafu)?;
-            }
-
-            if !rev_opts.no_template {
-                solvepy::write_stub_rev(&rev_opts).context(SolvepySnafu)?;
-            }
-        }
-        None => {
-            let pwn_opts = opts.pwn;
-            set_bin_exec_pwn(&pwn_opts).context(SetBinExecSnafu)?;
-            maybe_visit_libc(&pwn_opts);
-
-            // Redo detection in case the ld was downloaded
-            let opts = Opts {
-                pwn: pwn_opts,
-                cmd: None,
-            }
-            .find_if_unspec()
-            .context(FindSnafu)?;
-
-            let pwn_opts = opts.pwn;
-
-            set_ld_exec(&pwn_opts).context(SetLdExecSnafu)?;
-
-            if pwn_opts.uv {
-                uv_venv::ensure_uv_venv(&["pwntools"]).context(UvVenvSnafu)?;
-            }
-
-            if !pwn_opts.no_patch_bin {
-                patch_bin::patch_bin(&pwn_opts).context(PatchBinSnafu)?;
-            }
-
-            if !pwn_opts.no_template {
-                solvepy::write_stub_pwn(&pwn_opts).context(SolvepySnafu)?;
-            }
-        }
+        Some(Command::FetchLibc(fetch_opts)) => run_fetch_libc(fetch_opts),
+        Some(Command::Rev(rev_opts)) => run_rev_flow(rev_opts),
+        None => run_pwn_flow(opts.pwn),
     }
-
-    Ok(())
 }

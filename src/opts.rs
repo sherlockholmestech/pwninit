@@ -32,6 +32,26 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+fn fold_current_dir<T, F>(init: T, mut merge: F) -> Result<T>
+where
+    F: FnMut(T, fs::DirEntry) -> elf::detect::Result<T>,
+{
+    fs::read_dir(".")
+        .context(ReadDirSnafu)?
+        .try_fold(init, |acc, dir_ent| {
+            let dir_ent = dir_ent.context(DirEntSnafu)?;
+            merge(acc, dir_ent).context(ElfDetectSnafu)
+        })
+}
+
+fn detect_path_if(
+    dir_ent: &fs::DirEntry,
+    pred: fn(&Path) -> elf::detect::Result<bool>,
+) -> elf::detect::Result<Option<PathBuf>> {
+    let path = dir_ent.path();
+    Ok(if pred(&path)? { Some(path) } else { None })
+}
+
 /// automate starting binary exploit and reverse engineering challenges
 #[derive(StructOpt, Clone)]
 pub struct Opts {
@@ -211,8 +231,7 @@ impl Opts {
     pub fn find_if_unspec(self) -> Result<Self> {
         match self.cmd {
             Some(Command::Rev(opts)) => {
-                let mut dir = fs::read_dir(".").context(ReadDirSnafu)?;
-                let opts = dir.try_fold(opts, RevOpts::merge_result_entry)?;
+                let opts = fold_current_dir(opts, RevOpts::merge_entry)?;
                 Ok(Opts {
                     pwn: self.pwn,
                     cmd: Some(Command::Rev(opts)),
@@ -223,8 +242,7 @@ impl Opts {
                 cmd: Some(Command::FetchLibc(opts)),
             }),
             None => {
-                let mut dir = fs::read_dir(".").context(ReadDirSnafu)?;
-                let pwn = dir.try_fold(self.pwn, PwnOpts::merge_result_entry)?;
+                let pwn = fold_current_dir(self.pwn, PwnOpts::merge_entry)?;
                 Ok(Opts { pwn, cmd: None })
             }
         }
@@ -232,43 +250,21 @@ impl Opts {
 }
 
 impl PwnOpts {
-    /// Helper for `find_if_unspec()`, merging the `Opts` with a directory entry
-    fn merge_result_entry(self, dir_ent: io::Result<fs::DirEntry>) -> Result<Self> {
-        self.merge_entry(dir_ent.context(DirEntSnafu)?)
-            .context(ElfDetectSnafu)
-    }
-
-    /// Helper for `merge_result_entry()`, merging the `Opts` with a directory
-    /// entry
+    /// Helper for `find_if_unspec()`, merging the options with a directory entry.
     fn merge_entry(self, dir_ent: fs::DirEntry) -> elf::detect::Result<Self> {
-        let f = |pred: fn(&Path) -> elf::detect::Result<bool>| {
-            let path = dir_ent.path();
-            Ok(if pred(&path)? { Some(path) } else { None })
-        };
-
         Ok(self
             .clone()
-            .with_bin(self.bin.or(f(is_bin)?))
-            .with_libc(self.libc.or(f(is_libc)?))
-            .with_ld(self.ld.or(f(is_ld)?)))
+            .with_bin(self.bin.or(detect_path_if(&dir_ent, is_bin)?))
+            .with_libc(self.libc.or(detect_path_if(&dir_ent, is_libc)?))
+            .with_ld(self.ld.or(detect_path_if(&dir_ent, is_ld)?)))
     }
 }
 
 impl RevOpts {
-    /// Helper for `find_if_unspec()`, merging the `Opts` with a directory entry
-    fn merge_result_entry(self, dir_ent: io::Result<fs::DirEntry>) -> Result<Self> {
-        self.merge_entry(dir_ent.context(DirEntSnafu)?)
-            .context(ElfDetectSnafu)
-    }
-
-    /// Helper for `merge_result_entry()`, merging the `Opts` with a directory
-    /// entry
+    /// Helper for `find_if_unspec()`, merging the options with a directory entry.
     fn merge_entry(self, dir_ent: fs::DirEntry) -> elf::detect::Result<Self> {
-        let f = |pred: fn(&Path) -> elf::detect::Result<bool>| {
-            let path = dir_ent.path();
-            Ok(if pred(&path)? { Some(path) } else { None })
-        };
-
-        Ok(self.clone().with_bin(self.bin.or(f(is_bin)?)))
+        Ok(self
+            .clone()
+            .with_bin(self.bin.or(detect_path_if(&dir_ent, is_bin)?)))
     }
 }
