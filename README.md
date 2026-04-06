@@ -15,6 +15,8 @@ A tool for automating starting binary exploit challenges, as well as reverse eng
 - Download debug symbols and unstrip the libc
 - Patch the binary with [`patchelf`](https://github.com/NixOS/patchelf) to use
   the correct RPATH and interpreter for the provided libc
+- Optional manual patch mode that rewrites `PT_INTERP` and `DT_NEEDED`
+  directly without invoking `patchelf`
 - Fill in a template pwntools solve script
 - Fill in a template angr + z3 solve script for rev challenges
 - Create a local `uv` virtual environment in `.venv` and install `pwntools` (pwn) or `angr` + `z3-solver` (rev)
@@ -32,6 +34,10 @@ Run `pwninit` in a directory with the relevant files and it will detect which on
 Run `pwninit rev` in a directory with the relevant files and it will detect the reverse engineering binary. If the detection is wrong, you can specify the location with `--bin`.
 
 Use `--uv` to create a local `uv` virtual environment in `.venv` and install `pwntools` for pwn challenges or `angr` + `z3-solver` for rev challenges. By default, no virtual environment is created.
+
+By default, binary patching uses `patchelf` to set the RPATH to `.` and the interpreter to `./ld`. Use `--no-patchelf` to instead patch the binary directly by rewriting `PT_INTERP` and `DT_NEEDED` entries in place to short local names (e.g. `./ld`, `./libc`). Both modes create the same symlinks (`ld`, `libc`, etc.) in the challenge directory.
+
+`--no-patchelf` only applies replacements that fit in the original ELF string slot. Oversized or unresolved entries are skipped with a warning.
 
 #### Custom `solve.py` template
 

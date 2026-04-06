@@ -9,6 +9,7 @@ use snafu::ResultExt;
 use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
+#[allow(clippy::enum_variant_names)]
 pub enum Error {
     #[snafu(display("uv failed to start; please install uv: {}", source))]
     UvExec { source: io::Error },

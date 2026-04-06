@@ -76,10 +76,24 @@ fn make_bindings_pwn(opts: &PwnOpts) -> String {
     let patched_bin = patch_bin::bin_patched_path(opts);
     let bin_path = patched_bin.as_deref().or(opts.bin.as_deref());
 
+    // When patching runs, both modes produce short-named symlinks ("libc", "ld").
+    // Reference those in the template so the script doesn't hard-code versioned filenames.
+    let patch_active = !opts.no_patch_bin;
+    let libc_path: Option<&Path> = if patch_active && opts.libc.is_some() {
+        Some(Path::new("libc"))
+    } else {
+        opts.libc.as_deref()
+    };
+    let ld_path: Option<&Path> = if patch_active && opts.ld.is_some() {
+        Some(Path::new("ld"))
+    } else {
+        opts.ld.as_deref()
+    };
+
     join_bindings([
         make_pwn_elf_binding(&opts.template_bin_name, bin_path),
-        make_pwn_elf_binding(&opts.template_libc_name, opts.libc.as_deref()),
-        make_pwn_elf_binding(&opts.template_ld_name, opts.ld.as_deref()),
+        make_pwn_elf_binding(&opts.template_libc_name, libc_path),
+        make_pwn_elf_binding(&opts.template_ld_name, ld_path),
     ])
 }
 

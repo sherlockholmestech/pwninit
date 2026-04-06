@@ -68,32 +68,37 @@ pub fn fetch_libc_interactive(short_version: &str, arch: CpuArch, out_path: &Pat
         return Err(Error::NoVersionsFound);
     }
 
-    println!();
-    for (i, v) in versions.iter().enumerate() {
-        println!("  {}  {}", format!("[{}]", i + 1).bold(), v);
-    }
-    println!();
-
-    let choice = loop {
-        print!("{}", "select version: ".bold());
-        io::stdout().flush().context(StdinSnafu)?;
-
-        let mut line = String::new();
-        io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .context(StdinSnafu)?;
-
-        let trimmed = line.trim();
-        if let Ok(n) = trimmed.parse::<usize>() {
-            if n >= 1 && n <= versions.len() {
-                break n - 1;
-            }
+    let choice = if versions.len() == 1 {
+        println!("  {}", versions[0].bold());
+        0
+    } else {
+        println!();
+        for (i, v) in versions.iter().enumerate() {
+            println!("  {}  {}", format!("[{}]", i + 1).bold(), v);
         }
-        eprintln!(
-            "{}",
-            format!("please enter a number between 1 and {}", versions.len()).red()
-        );
+        println!();
+
+        loop {
+            print!("{}", "select version: ".bold());
+            io::stdout().flush().context(StdinSnafu)?;
+
+            let mut line = String::new();
+            io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .context(StdinSnafu)?;
+
+            let trimmed = line.trim();
+            if let Ok(n) = trimmed.parse::<usize>() {
+                if n >= 1 && n <= versions.len() {
+                    break n - 1;
+                }
+            }
+            eprintln!(
+                "{}",
+                format!("please enter a number between 1 and {}", versions.len()).red()
+            );
+        }
     };
 
     let full_version = versions[choice].clone();

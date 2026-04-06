@@ -18,6 +18,12 @@ use snafu::ResultExt;
 use snafu::Snafu;
 use structopt::StructOpt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchMode {
+    Patchelf,
+    Manual,
+}
+
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("ELF detection error: {}", source))]
@@ -64,7 +70,7 @@ pub struct Opts {
     pub cmd: Option<Command>,
 }
 
-/// Supported challenge types
+/// Challenge type to initialize (default: pwn)
 #[derive(StructOpt, Clone)]
 pub enum Command {
     /// Reverse engineering challenge
@@ -79,50 +85,50 @@ pub enum Command {
 #[setters(generate = "false")]
 #[setters(prefix = "with_")]
 pub struct PwnOpts {
-    /// Binary to pwn
+    /// Path to the challenge binary (auto-detected if not set)
     #[structopt(long)]
     #[setters(generate)]
     pub bin: Option<PathBuf>,
 
-    /// Challenge libc
+    /// Path to the challenge libc (auto-detected if not set)
     #[structopt(long)]
     #[setters(generate)]
     pub libc: Option<PathBuf>,
 
-    /// A linker to preload the libc
+    /// Path to the ELF interpreter / dynamic linker (auto-detected if not set)
     #[structopt(long)]
     #[setters(generate)]
     pub ld: Option<PathBuf>,
 
-    /// Path to custom pwntools solve script template. Check the README for more
-    /// information.
+    /// Path to a custom pwntools solve script template (uses built-in template if not set)
     #[structopt(long)]
     pub template_path: Option<PathBuf>,
 
-    /// Name of binary variable for pwntools solve script
-    #[structopt(long)]
-    #[structopt(default_value = "exe")]
+    /// Variable name for the binary in the solve script template
+    #[structopt(long, default_value = "exe")]
     pub template_bin_name: String,
 
-    /// Name of libc variable for pwntools solve script
-    #[structopt(long)]
-    #[structopt(default_value = "libc")]
+    /// Variable name for the libc in the solve script template
+    #[structopt(long, default_value = "libc")]
     pub template_libc_name: String,
 
-    /// Name of linker variable for pwntools solve script
-    #[structopt(long)]
-    #[structopt(default_value = "ld")]
+    /// Variable name for the linker in the solve script template
+    #[structopt(long, default_value = "ld")]
     pub template_ld_name: String,
 
-    /// Create a uv virtual environment with pwntools
+    /// Create a uv virtual environment with pwntools installed
     #[structopt(long)]
     pub uv: bool,
 
-    /// Disable running patchelf on binary
+    /// Skip patching the binary entirely
     #[structopt(long)]
     pub no_patch_bin: bool,
 
-    /// Disable generating template solve script
+    /// Use manual ELF byte patching instead of patchelf
+    #[structopt(long)]
+    pub no_patchelf: bool,
+
+    /// Skip generating the solve script template
     #[structopt(long)]
     pub no_template: bool,
 }
@@ -132,26 +138,24 @@ pub struct PwnOpts {
 #[setters(generate = "false")]
 #[setters(prefix = "with_")]
 pub struct RevOpts {
-    /// Binary to reverse
+    /// Path to the challenge binary (auto-detected if not set)
     #[structopt(long)]
     #[setters(generate)]
     pub bin: Option<PathBuf>,
 
-    /// Path to custom solve script template. Check the README for more
-    /// information.
+    /// Path to a custom angr solve script template (uses built-in template if not set)
     #[structopt(long)]
     pub template_path: Option<PathBuf>,
 
-    /// Name of binary variable for solve script
-    #[structopt(long)]
-    #[structopt(default_value = "exe")]
+    /// Variable name for the binary in the solve script template
+    #[structopt(long, default_value = "exe")]
     pub template_bin_name: String,
 
-    /// Create a uv virtual environment with angr + z3
+    /// Create a uv virtual environment with angr + z3 installed
     #[structopt(long)]
     pub uv: bool,
 
-    /// Disable generating template solve script
+    /// Skip generating the solve script template
     #[structopt(long)]
     pub no_template: bool,
 }
@@ -159,15 +163,14 @@ pub struct RevOpts {
 /// Options for downloading a libc by version
 #[derive(StructOpt, Clone)]
 pub struct FetchLibcOpts {
-    /// Short glibc version to search for, e.g. "2.31"
-    #[structopt(long)]
+    /// glibc version to download, e.g. "2.31"
     pub version: String,
 
-    /// Target architecture: "amd64" (default) or "i386"
-    #[structopt(long, default_value = "amd64")]
+    /// Target architecture
+    #[structopt(long, default_value = "amd64", possible_values = &["amd64", "i386"])]
     pub arch: CpuArch,
 
-    /// Output path for the downloaded libc (default: "libc.so.6")
+    /// Output path for the downloaded libc
     #[structopt(long, default_value = "libc.so.6")]
     pub output: PathBuf,
 }
@@ -184,6 +187,7 @@ impl Default for PwnOpts {
             template_ld_name: "ld".to_string(),
             uv: false,
             no_patch_bin: false,
+            no_patchelf: false,
             no_template: false,
         }
     }
@@ -250,6 +254,14 @@ impl Opts {
 }
 
 impl PwnOpts {
+    pub fn resolved_patch_mode(&self) -> PatchMode {
+        if self.no_patchelf {
+            PatchMode::Manual
+        } else {
+            PatchMode::Patchelf
+        }
+    }
+
     /// Helper for `find_if_unspec()`, merging the options with a directory entry.
     fn merge_entry(self, dir_ent: fs::DirEntry) -> elf::detect::Result<Self> {
         Ok(self
