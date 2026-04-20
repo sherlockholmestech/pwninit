@@ -296,56 +296,54 @@ fn apply_in_place_patch(bytes: &mut [u8], target: &PatchTarget) -> bool {
     true
 }
 
-fn ensure_symlink(logical_name: &str, target_path: &Path) -> Result<()> {
-    let link = PathBuf::from(logical_name);
-    let target = target_path.to_path_buf();
-
-    match fs::symlink_metadata(&link) {
+/// Create a symlink at `link` pointing to `target`.
+///
+/// - If `link` is already a symlink to `target`: no-op.
+/// - If `link` is a symlink to something else: replace it.
+/// - If `link` exists but is not a symlink (regular file/dir): warn and skip.
+/// - If `link` does not exist: create it.
+fn make_symlink(link: &Path, target: &Path) -> Result<()> {
+    match fs::symlink_metadata(link) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
-                if let Ok(existing) = fs::read_link(&link) {
-                    if existing == target {
-                        return Ok(());
-                    }
+                if fs::read_link(link).ok().as_deref() == Some(target) {
+                    return Ok(());
                 }
-
-                fs::remove_file(&link).context(RemoveLinkSnafu { link: link.clone() })?;
-                println!(
-                    "{}",
-                    format!(
-                        "symlinking {} -> {}",
-                        link.to_string_lossy().bold(),
-                        target.to_string_lossy().bold()
-                    )
-                    .green()
-                );
-                std::os::unix::fs::symlink(&target, &link)
-                    .context(SymlinkSnafu { link, target })?;
+                fs::remove_file(link).context(RemoveLinkSnafu {
+                    link: link.to_path_buf(),
+                })?;
+            } else {
+                format!("{} already exists", link.display()).warn("skipping symlink overwrite");
                 return Ok(());
             }
-
-            format!("{} already exists", link.display()).warn("skipping symlink overwrite");
-            Ok(())
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            println!(
-                "{}",
-                format!(
-                    "symlinking {} -> {}",
-                    link.to_string_lossy().bold(),
-                    target.to_string_lossy().bold()
-                )
-                .green()
-            );
-            std::os::unix::fs::symlink(&target, &link).context(SymlinkSnafu { link, target })?;
-            Ok(())
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(Error::Symlink {
+                link: link.to_path_buf(),
+                target: target.to_path_buf(),
+                source,
+            })
         }
-        Err(source) => Err(Error::Symlink {
-            link,
-            target,
-            source,
-        }),
     }
+
+    println!(
+        "{}",
+        format!(
+            "symlinking {} -> {}",
+            link.to_string_lossy().bold(),
+            target.to_string_lossy().bold()
+        )
+        .green()
+    );
+    std::os::unix::fs::symlink(target, link).context(SymlinkSnafu {
+        link: link.to_path_buf(),
+        target: target.to_path_buf(),
+    })
+}
+
+fn ensure_symlink(logical_name: &str, target_path: &Path) -> Result<()> {
+    make_symlink(Path::new(logical_name), target_path)
 }
 
 fn patch_manually(bin_patched: &Path, opts: &PwnOpts) -> Result<()> {
@@ -411,42 +409,14 @@ fn run_patchelf_option(bin: &Path, option: &str, argument: &PathBuf) -> Result<(
     }
 }
 
-/// Create a symlink `libc.so.6` pointing to `libc`.
+/// Create a symlink `libc.so.6` pointing to `libc`'s filename.
 ///
-/// If `libc` doesn't have the filename `libc.so.6`,
-/// make a symlink with file name `libc.so.6` in the same directory as `libc`,
-/// and make it point to `libc`.
+/// If `libc` already has the filename `libc.so.6`, this is a no-op.
 fn symlink_libc(libc: &Path) -> Result<()> {
     let libc_file_name = libc.file_name().context(FileNameSnafu { path: libc })?;
     if libc_file_name != LIBC_FILE_NAME {
         let link = libc.with_file_name(LIBC_FILE_NAME);
-        if let Ok(meta) = fs::symlink_metadata(&link) {
-            if meta.file_type().is_symlink() {
-                if let Ok(existing) = fs::read_link(&link) {
-                    if existing == libc_file_name {
-                        return Ok(());
-                    }
-                }
-                fs::remove_file(&link).context(RemoveLinkSnafu { link: link.clone() })?;
-            } else {
-                format!("{} already exists", link.display()).warn("skipping symlink overwrite");
-                return Ok(());
-            }
-        }
-
-        println!(
-            "{}",
-            format!(
-                "symlinking {} -> {}",
-                link.to_string_lossy().bold(),
-                libc_file_name.to_string_lossy().bold()
-            )
-            .green()
-        );
-        std::os::unix::fs::symlink(libc_file_name, &link).context(SymlinkSnafu {
-            link,
-            target: libc_file_name,
-        })?;
+        make_symlink(&link, Path::new(libc_file_name))?;
     }
     Ok(())
 }

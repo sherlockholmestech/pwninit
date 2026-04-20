@@ -34,11 +34,6 @@ pub enum Error {
 
 pub type Result = std::result::Result<(), Error>;
 
-/// Download the libc matching version `ver` and save to `out_path`
-fn is_pre_234(ver: &LibcVersion) -> bool {
-    version_compare::compare_to(&ver.string_short, "2.34", version_compare::Cmp::Lt).unwrap_or(true)
-}
-
 pub fn fetch_libc(ver: &LibcVersion, out_path: &Path) -> Result {
     println!("{}", "fetching libc".yellow().bold());
 
@@ -49,7 +44,7 @@ pub fn fetch_libc(ver: &LibcVersion, out_path: &Path) -> Result {
     let versioned_name = format!("libc-{}.so", ver.string_short);
     let standard_name = "libc.so.6";
 
-    let file_names: &[&str] = if is_pre_234(ver) {
+    let file_names: &[&str] = if ver.is_pre_234() {
         &[versioned_name.as_str(), standard_name]
     } else {
         &[standard_name, versioned_name.as_str()]

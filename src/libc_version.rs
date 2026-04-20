@@ -13,6 +13,7 @@ use snafu::OptionExt;
 use snafu::ResultExt;
 use snafu::Snafu;
 use twoway::find_bytes;
+use version_compare::Cmp;
 
 /// Libc version information
 pub struct LibcVersion {
@@ -70,6 +71,14 @@ impl LibcVersion {
             string_short,
             arch,
         })
+    }
+
+    /// Returns true if this libc version is older than 2.34.
+    ///
+    /// Older glibc ships versioned filenames (e.g. `ld-2.31.so`, `libc-2.31.so`);
+    /// glibc >= 2.34 ships only the canonical soname.
+    pub fn is_pre_234(&self) -> bool {
+        version_compare::compare_to(&self.string_short, "2.34", Cmp::Lt).unwrap_or(true)
     }
 
     /// Detect the version of a libc
