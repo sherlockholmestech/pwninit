@@ -1,0 +1,23 @@
+name: Build and Upload Linux Binary
+on:
+  release:
+    types: [created]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: Build Linux binary
+        run: |
+          cargo build --release
+          cp target/release/pwninit pwninit-linux-amd64
+      - name: Upload binary
+        uses: actions/upload-artifact@v2
+        with:
+          name: pwninit-linux-amd64
+          path: pwninit-linux-amd64
