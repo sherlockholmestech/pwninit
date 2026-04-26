@@ -14,11 +14,8 @@ pub enum Error {
     #[snafu(display("uv failed to start; please install uv: {}", source))]
     UvExec { source: io::Error },
 
-    #[snafu(display("uv venv failed with nonzero exit status"))]
-    UvVenv,
-
-    #[snafu(display("uv pip install failed with nonzero exit status"))]
-    UvPipInstall,
+    #[snafu(display("uv command failed with nonzero exit status"))]
+    UvCmd,
 }
 
 pub type Result<T = ()> = std::result::Result<T, Error>;
@@ -31,7 +28,7 @@ fn run_uv(args: &[&str]) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(Error::UvPipInstall)
+        Err(Error::UvCmd)
     }
 }
 
@@ -41,13 +38,7 @@ pub fn ensure_uv_venv(packages: &[&str]) -> Result {
     let venv_path = Path::new(".venv");
     if !venv_path.exists() {
         println!("{}", "creating uv virtual environment".cyan().bold());
-        let status = Command::new("uv")
-            .args(["venv", ".venv"])
-            .status()
-            .context(UvExecSnafu)?;
-        if !status.success() {
-            return Err(Error::UvVenv);
-        }
+        run_uv(&["venv", ".venv"])?;
     }
 
     println!("{}", "installing packages with uv".cyan().bold());

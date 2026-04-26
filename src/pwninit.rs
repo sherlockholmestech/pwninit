@@ -53,7 +53,7 @@ fn run_rev_flow(rev_opts: crate::opts::RevOpts) -> Result {
     }
 
     if !rev_opts.no_template {
-        solvepy::write_stub_rev(&rev_opts).context(SolvepySnafu)?;
+        solvepy::write_stub(&rev_opts).context(SolvepySnafu)?;
     }
 
     Ok(())
@@ -63,14 +63,8 @@ fn run_pwn_flow(mut pwn_opts: crate::opts::PwnOpts) -> Result {
     set_bin_exec_pwn(&pwn_opts).context(SetBinExecSnafu)?;
     maybe_visit_libc(&pwn_opts);
 
-    // Redo detection in case the ld was downloaded.
-    pwn_opts = Opts {
-        pwn: pwn_opts,
-        cmd: None,
-    }
-    .find_if_unspec()
-    .context(FindSnafu)?
-    .pwn;
+    // Re-scan for a freshly downloaded linker
+    pwn_opts = pwn_opts.detect_ld().context(FindSnafu)?;
 
     set_ld_exec(&pwn_opts).context(SetLdExecSnafu)?;
 
@@ -83,7 +77,7 @@ fn run_pwn_flow(mut pwn_opts: crate::opts::PwnOpts) -> Result {
     }
 
     if !pwn_opts.no_template {
-        solvepy::write_stub_pwn(&pwn_opts).context(SolvepySnafu)?;
+        solvepy::write_stub(&pwn_opts).context(SolvepySnafu)?;
     }
 
     Ok(())

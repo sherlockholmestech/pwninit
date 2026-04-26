@@ -53,7 +53,7 @@ pub fn search_versions(short_version: &str, arch: &CpuArch) -> Result<Vec<String
 
     let arch_str = arch.to_string();
     let prefix = format!("{}-", short_version);
-    let mut versions: Vec<String> = Vec::new();
+    let mut versions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut url: Option<String> = Some(LAUNCHPAD_API.to_string());
 
     while let Some(next_url) = url {
@@ -72,16 +72,14 @@ pub fn search_versions(short_version: &str, arch: &CpuArch) -> Result<Vec<String
             }
             // Filter by version prefix
             if entry.binary_package_version.starts_with(&prefix) {
-                let v = entry.binary_package_version;
-                if !versions.contains(&v) {
-                    versions.push(v);
-                }
+                versions.insert(entry.binary_package_version);
             }
         }
 
         url = page.next_collection_link;
     }
 
+    let mut versions: Vec<String> = versions.into_iter().collect();
     versions.sort_by(|a, b| {
         version_compare::compare(a, b)
             .map(|ord| match ord {

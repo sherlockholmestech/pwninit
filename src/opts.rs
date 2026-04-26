@@ -38,7 +38,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn fold_current_dir<T, F>(init: T, mut merge: F) -> Result<T>
+pub(crate) fn fold_current_dir<T, F>(init: T, mut merge: F) -> Result<T>
 where
     F: FnMut(T, fs::DirEntry) -> elf::detect::Result<T>,
 {
@@ -260,6 +260,17 @@ impl PwnOpts {
         } else {
             PatchMode::Patchelf
         }
+    }
+
+    /// Re-scan the current directory for a linker if one is not already specified.
+    pub fn detect_ld(self) -> Result<Self> {
+        if self.ld.is_some() {
+            return Ok(self);
+        }
+        fold_current_dir(self, |opts, dir_ent| {
+            let ld = detect_path_if(&dir_ent, is_ld)?;
+            Ok(opts.with_ld(ld))
+        })
     }
 
     /// Helper for `find_if_unspec()`, merging the options with a directory entry.

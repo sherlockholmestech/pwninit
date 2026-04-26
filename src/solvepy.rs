@@ -2,6 +2,7 @@ use crate::opts::{PwnOpts, RevOpts};
 use crate::patch_bin;
 use crate::set_exec;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::string;
 
@@ -33,6 +34,16 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) trait StubOptions {
+    fn default_template() -> &'static str;
+    fn make_bindings(&self) -> String;
+    fn extra_vars(&self) -> HashMap<String, String> {
+        HashMap::new()
+    }
+    fn bin_name(&self) -> &str;
+    fn template_path(&self) -> Option<&Path>;
+}
 
 fn read_template(path: Option<&Path>, default_template: &str) -> Result<String> {
     match path {
@@ -70,14 +81,10 @@ fn join_bindings(bindings: impl IntoIterator<Item = Option<String>>) -> String {
         .join("\n")
 }
 
-/// Make pwntools script that binds the (binary, libc, linker) to `ELF`
-/// variables
 fn make_bindings_pwn(opts: &PwnOpts) -> String {
     let patched_bin = patch_bin::bin_patched_path(opts);
     let bin_path = patched_bin.as_deref().or(opts.bin.as_deref());
 
-    // When patching runs, both modes produce short-named symlinks ("libc", "ld").
-    // Reference those in the template so the script doesn't hard-code versioned filenames.
     let patch_active = !opts.no_patch_bin;
     let libc_path: Option<&Path> = if patch_active && opts.libc.is_some() {
         Some(Path::new("libc"))
@@ -97,7 +104,6 @@ fn make_bindings_pwn(opts: &PwnOpts) -> String {
     ])
 }
 
-/// Make angr script that binds the binary path for analysis
 fn make_bindings_rev(opts: &RevOpts) -> String {
     join_bindings([make_rev_path_binding(
         &opts.template_bin_name,
@@ -105,51 +111,63 @@ fn make_bindings_rev(opts: &RevOpts) -> String {
     )])
 }
 
-/// Make arguments to pwntools `process()` function
 fn make_proc_args_pwn(opts: &PwnOpts) -> String {
     format!("[{}.path]", opts.template_bin_name)
 }
 
-/// Fill in template pwntools solve script with (binary, libc, linker) paths
-fn make_stub_pwn(opts: &PwnOpts) -> Result<String> {
-    let templ = read_template(opts.template_path.as_deref(), include_str!("template.py"))?;
-    strfmt(
-        &templ,
-        &hashmap! {
-        "bindings".to_string() => make_bindings_pwn(opts),
-        "proc_args".to_string() => make_proc_args_pwn(opts),
-        "bin_name".to_string() => opts.template_bin_name.clone(),
-        },
-    )
-    .context(FmtSnafu)
+impl StubOptions for PwnOpts {
+    fn default_template() -> &'static str {
+        include_str!("template.py")
+    }
+
+    fn make_bindings(&self) -> String {
+        make_bindings_pwn(self)
+    }
+
+    fn extra_vars(&self) -> HashMap<String, String> {
+        hashmap! {
+            "proc_args".to_string() => make_proc_args_pwn(self),
+        }
+    }
+
+    fn bin_name(&self) -> &str {
+        &self.template_bin_name
+    }
+
+    fn template_path(&self) -> Option<&Path> {
+        self.template_path.as_deref()
+    }
 }
 
-/// Fill in template angr solve script with binary path
-fn make_stub_rev(opts: &RevOpts) -> Result<String> {
-    let templ = read_template(
-        opts.template_path.as_deref(),
-        include_str!("template_rev.py"),
-    )?;
-    strfmt(
-        &templ,
-        &hashmap! {
-        "bindings".to_string() => make_bindings_rev(opts),
-        "bin_name".to_string() => opts.template_bin_name.clone(),
-        },
-    )
-    .context(FmtSnafu)
+impl StubOptions for RevOpts {
+    fn default_template() -> &'static str {
+        include_str!("template_rev.py")
+    }
+
+    fn make_bindings(&self) -> String {
+        make_bindings_rev(self)
+    }
+
+    fn bin_name(&self) -> &str {
+        &self.template_bin_name
+    }
+
+    fn template_path(&self) -> Option<&Path> {
+        self.template_path.as_deref()
+    }
 }
 
-/// Write script produced with `make_stub_pwn()` to `solve.py` in the
-/// specified directory, unless a `solve.py` already exists
-pub fn write_stub_pwn(opts: &PwnOpts) -> Result<()> {
-    let stub = make_stub_pwn(opts)?;
-    write_stub_file(stub)
+fn make_stub<T: StubOptions>(opts: &T) -> Result<String> {
+    let templ = read_template(opts.template_path(), T::default_template())?;
+    let mut vars = hashmap! {
+        "bindings".to_string() => opts.make_bindings(),
+        "bin_name".to_string() => opts.bin_name().to_string(),
+    };
+    vars.extend(opts.extra_vars());
+    strfmt(&templ, &vars).context(FmtSnafu)
 }
 
-/// Write script produced with `make_stub_rev()` to `solve.py` in the
-/// specified directory, unless a `solve.py` already exists
-pub fn write_stub_rev(opts: &RevOpts) -> Result<()> {
-    let stub = make_stub_rev(opts)?;
+pub fn write_stub<T: StubOptions>(opts: &T) -> Result<()> {
+    let stub = make_stub(opts)?;
     write_stub_file(stub)
 }

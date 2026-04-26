@@ -32,6 +32,7 @@ use crate::warn::WarnResult;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use colored::Color;
 use colored::Colorize;
 use ex::io;
 use is_executable::IsExecutable;
@@ -95,44 +96,39 @@ pub fn maybe_visit_libc(opts: &PwnOpts) {
     }
 }
 
-/// Set the binary executable
-fn set_bin_exec_inner(bin: &Option<PathBuf>) -> io::Result<()> {
-    match bin {
-        Some(bin) => {
-            if !bin.is_executable() {
-                println!(
-                    "{}",
-                    format!("setting {} executable", bin.to_string_lossy().bold()).bright_blue()
-                );
-                set_exec(bin)?;
-            }
+fn set_exec_if_needed(
+    path: &Option<PathBuf>,
+    label: &str,
+    color: Color,
+    warn_on_missing: bool,
+) -> io::Result<()> {
+    match path {
+        Some(path) if !path.is_executable() => {
+            println!(
+                "{}",
+                format!("setting {} executable", path.to_string_lossy().bold()).color(color)
+            );
+            set_exec(path)
         }
-        None => "binary not found".warn("failed setting binary to be executable"),
+        None if warn_on_missing => {
+            format!("{} not found", label).warn("failed setting executable");
+            Ok(())
+        }
+        _ => Ok(()),
     }
-
-    Ok(())
 }
 
 /// Set the binary executable (pwn)
 pub fn set_bin_exec_pwn(opts: &PwnOpts) -> io::Result<()> {
-    set_bin_exec_inner(&opts.bin)
+    set_exec_if_needed(&opts.bin, "binary", Color::BrightBlue, true)
 }
 
 /// Set the binary executable (rev)
 pub fn set_bin_exec_rev(opts: &RevOpts) -> io::Result<()> {
-    set_bin_exec_inner(&opts.bin)
+    set_exec_if_needed(&opts.bin, "binary", Color::BrightBlue, true)
 }
 
 /// Set the detected linker executable
 pub fn set_ld_exec(opts: &PwnOpts) -> io::Result<()> {
-    match &opts.ld {
-        Some(ld) if !ld.is_executable() => {
-            println!(
-                "{}",
-                format!("setting {} executable", ld.to_string_lossy().bold()).green()
-            );
-            set_exec(ld)
-        }
-        _ => Ok(()),
-    }
+    set_exec_if_needed(&opts.ld, "linker", Color::Green, false)
 }

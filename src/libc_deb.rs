@@ -14,7 +14,7 @@ use snafu::ResultExt;
 use snafu::Snafu;
 
 /// URL for Ubuntu glibc packages
-pub static PKG_URL: &str = "https://launchpad.net/ubuntu/+archive/primary/+files/";
+pub static PKG_URL: &str = "https://launchpad.net/ubuntu/+archive/primary/+files";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
