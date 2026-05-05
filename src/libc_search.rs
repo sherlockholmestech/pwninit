@@ -7,12 +7,19 @@ use serde::Deserialize;
 use snafu::ResultExt;
 use snafu::Snafu;
 
-const LAUNCHPAD_API: &str = "https://api.launchpad.net/1.0/ubuntu/+archive/primary\
-     ?ws.op=getPublishedBinaries\
-     &binary_name=libc6\
-     &exact_match=true\
-     &status=Published\
-     &ws.size=300";
+const LAUNCHPAD_API_BASE: &str = "https://api.launchpad.net/1.0/ubuntu/+archive/primary";
+const LAUNCHPAD_PAGE_SIZE: &str = "300";
+
+fn launchpad_api_url() -> String {
+    let mut url = reqwest::Url::parse(LAUNCHPAD_API_BASE).expect("Launchpad API URL is valid");
+    url.query_pairs_mut()
+        .append_pair("ws.op", "getPublishedBinaries")
+        .append_pair("binary_name", "libc6")
+        .append_pair("exact_match", "true")
+        .append_pair("status", "Published")
+        .append_pair("ws.size", LAUNCHPAD_PAGE_SIZE);
+    url.to_string()
+}
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -54,7 +61,7 @@ pub fn search_versions(short_version: &str, arch: &CpuArch) -> Result<Vec<String
     let arch_str = arch.to_string();
     let prefix = format!("{}-", short_version);
     let mut versions: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut url: Option<String> = Some(LAUNCHPAD_API.to_string());
+    let mut url: Option<String> = Some(launchpad_api_url());
 
     while let Some(next_url) = url {
         let page: Page = reqwest::blocking::get(&next_url)

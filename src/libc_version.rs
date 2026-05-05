@@ -39,19 +39,18 @@ impl fmt::Display for LibcVersion {
 }
 
 #[derive(Debug, Snafu)]
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     #[snafu(display("failed reading file: {}", source))]
-    ReadError { source: io::Error },
+    Read { source: io::Error },
 
     #[snafu(display("failed finding version string"))]
-    NotFoundError,
+    NotFound,
 
     #[snafu(display("invalid architecture: {}", source))]
-    ArchError { source: cpu_arch::Error },
+    Arch { source: cpu_arch::Error },
 
     #[snafu(display("invalid UTF-8 in version string: {}", source))]
-    Utf8Error { source: str::Utf8Error },
+    Utf8 { source: str::Utf8Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -78,7 +77,16 @@ impl LibcVersion {
     /// Older glibc ships versioned filenames (e.g. `ld-2.31.so`, `libc-2.31.so`);
     /// glibc >= 2.34 ships only the canonical soname.
     pub fn is_pre_234(&self) -> bool {
-        version_compare::compare_to(&self.string_short, "2.34", Cmp::Lt).unwrap_or(true)
+        match version_compare::compare_to(&self.string_short, "2.34", Cmp::Lt) {
+            Ok(is_pre_234) => is_pre_234,
+            Err(()) => {
+                eprintln!(
+                    "warning: failed parsing libc version {}; assuming glibc >= 2.34",
+                    self.string_short
+                );
+                false
+            }
+        }
     }
 
     /// Detect the version of a libc

@@ -22,6 +22,9 @@ pub use crate::pwninit::Result;
 use crate::elf::detect::is_elf;
 pub use crate::fetch_ld::fetch_ld;
 pub use crate::fetch_libc::fetch_libc;
+pub use crate::fetch_libc::fetch_libc_lib;
+pub use crate::fetch_libc::fetch_libm;
+pub use crate::fetch_libc::fetch_libpthread;
 use crate::libc_version::LibcVersion;
 use crate::opts::{PwnOpts, RevOpts};
 pub use crate::set_exec::set_exec;
@@ -29,14 +32,12 @@ pub use crate::unstrip_libc::unstrip_libc;
 use crate::warn::Warn;
 use crate::warn::WarnResult;
 
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use colored::Color;
 use colored::Colorize;
 use ex::io;
 use is_executable::IsExecutable;
-use twoway::find_bytes;
 
 /// Detect if `path` is the provided pwn binary
 pub fn is_bin(path: &Path) -> elf::detect::Result<bool> {
@@ -48,21 +49,22 @@ pub fn is_bin(path: &Path) -> elf::detect::Result<bool> {
     Ok(!is_patched && is_elf(path)? && !is_libc(path)? && !is_ld(path)?)
 }
 
-/// Does the filename of `path` contain `pattern`?
-fn path_contains(path: &Path, pattern: &[u8]) -> bool {
+/// Detect whether the filename of `path` starts with one of `prefixes`.
+fn path_name_starts_with(path: &Path, prefixes: &[&str]) -> bool {
     path.file_name()
-        .map(|name| find_bytes(name.as_bytes(), pattern).is_some())
+        .and_then(|name| name.to_str())
+        .map(|name| prefixes.iter().any(|prefix| name.starts_with(prefix)))
         .unwrap_or(false)
 }
 
 /// Detect if `path` is the provided libc
 pub fn is_libc(path: &Path) -> elf::detect::Result<bool> {
-    Ok(is_elf(path)? && path_contains(path, b"libc"))
+    Ok(is_elf(path)? && path_name_starts_with(path, &["libc.", "libc-"]))
 }
 
 /// Detect if `path` is the provided linker
 pub fn is_ld(path: &Path) -> elf::detect::Result<bool> {
-    Ok(is_elf(path)? && path_contains(path, b"ld-"))
+    Ok(is_elf(path)? && path_name_starts_with(path, &["ld-"]))
 }
 
 /// Same as `fetch_ld()`, but doesn't do anything if an existing linker is

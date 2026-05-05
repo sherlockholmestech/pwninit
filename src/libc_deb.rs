@@ -13,8 +13,8 @@ use snafu::OptionExt;
 use snafu::ResultExt;
 use snafu::Snafu;
 
-/// URL for Ubuntu glibc packages
-pub static PKG_URL: &str = "https://launchpad.net/ubuntu/+archive/primary/+files";
+/// Ubuntu primary archive package file endpoint used for glibc deb downloads.
+pub const PKG_URL: &str = "https://launchpad.net/ubuntu/+archive/primary/+files";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -44,7 +44,6 @@ fn tar_entry_matches_any<R: Read>(
 }
 
 #[derive(Debug, Snafu)]
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     #[snafu(display("failed to download package from Ubuntu mirror: {}", source))]
     Download { source: reqwest::Error },

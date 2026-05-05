@@ -9,26 +9,22 @@ use snafu::ResultExt;
 use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     #[snafu(display("uv failed to start; please install uv: {}", source))]
-    UvExec { source: io::Error },
+    Exec { source: io::Error },
 
     #[snafu(display("uv command failed with nonzero exit status"))]
-    UvCmd,
+    CommandFailed,
 }
 
 pub type Result<T = ()> = std::result::Result<T, Error>;
 
 fn run_uv(args: &[&str]) -> Result<()> {
-    let status = Command::new("uv")
-        .args(args)
-        .status()
-        .context(UvExecSnafu)?;
+    let status = Command::new("uv").args(args).status().context(ExecSnafu)?;
     if status.success() {
         Ok(())
     } else {
-        Err(Error::UvCmd)
+        Err(Error::CommandFailed)
     }
 }
 

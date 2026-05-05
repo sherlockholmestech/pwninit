@@ -1,5 +1,4 @@
-[![Checks Status](https://github.com/io12/pwninit/workflows/checks/badge.svg)](https://github.com/io12/pwninit/actions)
-[![Deploy Status](https://github.com/io12/pwninit/workflows/deploy/badge.svg)](https://github.com/io12/pwninit/actions)
+[![Build Status](https://github.com/io12/pwninit/workflows/Build/badge.svg)](https://github.com/io12/pwninit/actions)
 [![](https://img.shields.io/crates/v/pwninit)](https://crates.io/crates/pwninit)
 [![](https://docs.rs/pwninit/badge.svg)](https://docs.rs/pwninit)
 
@@ -12,6 +11,7 @@ A tool for automating starting binary exploit challenges, as well as reverse eng
 
 - Set challenge binary to be executable
 - Download a linker (`ld-linux.so.*`) that can segfaultlessly load the provided libc
+- Optionally download additional libraries from the same libc package
 - Download debug symbols and unstrip the libc
 - Patch the binary with [`patchelf`](https://github.com/NixOS/patchelf) to use
   the correct RPATH and interpreter for the provided libc
@@ -34,6 +34,8 @@ Run `pwninit` in a directory with the relevant files and it will detect which on
 Run `pwninit rev` in a directory with the relevant files and it will detect the reverse engineering binary. If the detection is wrong, you can specify the location with `--bin`.
 
 Use `--uv` to create a local `uv` virtual environment in `.venv` and install `pwntools` for pwn challenges or `angr` + `z3-solver` for rev challenges. By default, no virtual environment is created.
+
+Use `pwninit fetch-libc <version> --lib <name>` to download additional libraries from the same libc package. The option is repeatable, accepts sonames such as `libm.so.6`, `libdl.so.2`, or `libnss_dns.so.2`, and also accepts `libm` and `libpthread` as aliases for `libm.so.6` and `libpthread.so.0`.
 
 By default, binary patching uses `patchelf` to set the RPATH to `.` and the interpreter to `./ld`. Use `--no-patchelf` to instead patch the binary directly by rewriting `PT_INTERP` and `DT_NEEDED` entries in place to short local names (e.g. `./ld`, `./libc`). Both modes create the same symlinks (`ld`, `libc`, etc.) in the challenge directory.
 

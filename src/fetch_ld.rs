@@ -12,7 +12,7 @@ pub enum Error {
     Deb { source: libc_deb::Error },
 }
 
-pub type Result = std::result::Result<(), Error>;
+pub type Result<T = ()> = std::result::Result<T, Error>;
 
 fn ld_name_in_deb(ver: &LibcVersion) -> String {
     if ver.is_pre_234() {

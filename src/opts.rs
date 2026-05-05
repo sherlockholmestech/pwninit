@@ -173,6 +173,10 @@ pub struct FetchLibcOpts {
     /// Output path for the downloaded libc
     #[structopt(long, default_value = "libc.so.6")]
     pub output: PathBuf,
+
+    /// Additional libc package library to download (repeatable; accepts sonames like libm.so.6)
+    #[structopt(long = "lib", value_name = "NAME")]
+    pub extra_libs: Vec<String>,
 }
 
 impl Default for PwnOpts {
@@ -289,5 +293,45 @@ impl RevOpts {
         Ok(self
             .clone()
             .with_bin(self.bin.or(detect_path_if(&dir_ent, is_bin)?)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetch_libc_accepts_repeated_extra_libs() {
+        let opts = Opts::from_iter_safe([
+            "pwninit",
+            "fetch-libc",
+            "2.31",
+            "--lib",
+            "libm.so.6",
+            "--lib",
+            "libnss_dns.so.2",
+        ])
+        .expect("fetch-libc should parse repeated --lib values");
+
+        let Some(Command::FetchLibc(fetch_opts)) = opts.cmd else {
+            panic!("expected fetch-libc command");
+        };
+        assert_eq!(fetch_opts.extra_libs, ["libm.so.6", "libnss_dns.so.2"]);
+    }
+
+    #[test]
+    fn fetch_libc_defaults_to_no_extra_libs() {
+        let opts = Opts::from_iter_safe(["pwninit", "fetch-libc", "2.31"])
+            .expect("fetch-libc should parse without --lib");
+
+        let Some(Command::FetchLibc(fetch_opts)) = opts.cmd else {
+            panic!("expected fetch-libc command");
+        };
+        assert!(fetch_opts.extra_libs.is_empty());
+    }
+
+    #[test]
+    fn pwn_flow_does_not_accept_extra_libs() {
+        assert!(Opts::from_iter_safe(["pwninit", "--lib", "libm.so.6"]).is_err());
     }
 }

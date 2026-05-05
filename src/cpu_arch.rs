@@ -46,7 +46,7 @@ pub enum Error {
     },
 }
 
-pub type Result = std::result::Result<CpuArch, Error>;
+pub type Result<T = CpuArch> = std::result::Result<T, Error>;
 
 impl FromStr for CpuArch {
     type Err = Error;

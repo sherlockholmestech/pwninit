@@ -18,7 +18,6 @@ use snafu::Snafu;
 use tempfile::TempDir;
 
 #[derive(Debug, Snafu)]
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     #[snafu(display("libc ELF parse error: {}", source))]
     ElfParse { source: elf::parse::Error },
@@ -45,7 +44,7 @@ pub enum Error {
     LibcWrite { source: std::io::Error },
 }
 
-pub type Result = std::result::Result<(), Error>;
+pub type Result<T = ()> = std::result::Result<T, Error>;
 
 /// Download debug symbols and apply them to a libc
 fn do_unstrip_libc(libc: &Path, ver: &LibcVersion) -> Result {

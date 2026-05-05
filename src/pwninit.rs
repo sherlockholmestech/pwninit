@@ -14,7 +14,6 @@ use snafu::Snafu;
 
 /// Top-level `pwninit` error
 #[derive(Debug, Snafu)]
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     #[snafu(display("failed setting binary executable: {}", source))]
     SetBinExec { source: io::Error },
@@ -38,11 +37,16 @@ pub enum Error {
     FetchLibc { source: fetch_libc::Error },
 }
 
-pub type Result = std::result::Result<(), Error>;
+pub type Result<T = ()> = std::result::Result<T, Error>;
 
 fn run_fetch_libc(fetch_opts: crate::opts::FetchLibcOpts) -> Result {
-    fetch_libc::fetch_libc_interactive(&fetch_opts.version, fetch_opts.arch, &fetch_opts.output)
-        .context(FetchLibcSnafu)
+    fetch_libc::fetch_libc_interactive(
+        &fetch_opts.version,
+        fetch_opts.arch,
+        &fetch_opts.output,
+        &fetch_opts.extra_libs,
+    )
+    .context(FetchLibcSnafu)
 }
 
 fn run_rev_flow(rev_opts: crate::opts::RevOpts) -> Result {

@@ -22,7 +22,6 @@ use snafu::ResultExt;
 use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
-#[allow(clippy::enum_variant_names)]
 pub enum Error {
     #[snafu(display("patchelf failed with nonzero exit status"))]
     Patchelf,
@@ -121,21 +120,28 @@ fn logical_lib_name(name: &str) -> Option<String> {
     }
 
     let rest = &name[3..];
-    if let Some(pos) = rest.find(".so") {
+
+    // Try versioned-name pattern first (e.g. libm-2.31.so -> libm)
+    if let Some(pos) = rest.find('-') {
         let base = &rest[..pos];
-        if !base.is_empty() {
+        if is_valid_logical_lib_base(base) && rest[pos..].contains(".so") {
             return Some(format!("lib{}", base));
         }
     }
 
-    if let Some(pos) = rest.find('-') {
+    // Fall back to standard .so pattern (e.g. libm.so.6 -> libm)
+    if let Some(pos) = rest.find(".so") {
         let base = &rest[..pos];
-        if !base.is_empty() && rest[pos..].contains(".so") {
+        if is_valid_logical_lib_base(base) {
             return Some(format!("lib{}", base));
         }
     }
 
     None
+}
+
+fn is_valid_logical_lib_base(base: &str) -> bool {
+    base.chars().any(|ch| ch.is_ascii_alphanumeric())
 }
 
 fn discover_local_libs() -> io::Result<HashMap<String, PathBuf>> {
@@ -493,4 +499,45 @@ pub fn patch_bin(opts: &PwnOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logical_lib_name_handles_glibc_core_names() {
+        assert_eq!(logical_lib_name("ld-2.31.so").as_deref(), Some("ld"));
+        assert_eq!(
+            logical_lib_name("ld-linux-x86-64.so.2").as_deref(),
+            Some("ld")
+        );
+        assert_eq!(logical_lib_name("libc.so.6").as_deref(), Some("libc"));
+        assert_eq!(logical_lib_name("libc-2.31.so").as_deref(), Some("libc"));
+    }
+
+    #[test]
+    fn logical_lib_name_handles_regular_and_versioned_libs() {
+        assert_eq!(logical_lib_name("libm.so.6").as_deref(), Some("libm"));
+        assert_eq!(logical_lib_name("libm-2.31.so").as_deref(), Some("libm"));
+        assert_eq!(
+            logical_lib_name("libnss_dns.so.2").as_deref(),
+            Some("libnss_dns")
+        );
+        assert_eq!(
+            logical_lib_name("libnss_dns-2.31.so").as_deref(),
+            Some("libnss_dns")
+        );
+        assert_eq!(
+            logical_lib_name("libstdc++.so.6").as_deref(),
+            Some("libstdc++")
+        );
+    }
+
+    #[test]
+    fn logical_lib_name_rejects_unsupported_names() {
+        assert_eq!(logical_lib_name("notlib.so.1"), None);
+        assert_eq!(logical_lib_name("libbroken"), None);
+        assert_eq!(logical_lib_name("lib-.so"), None);
+    }
 }
