@@ -1,10 +1,10 @@
 [package]
 name = "pwninit"
 version = "3.6.0"
-authors = ["Benjamin Levy <blevy@protonmail.com>"]
+authors = ["Sherlock Holmes"]
 edition = "2021"
 description = "automate starting binary exploit challenges"
-repository = "https://github.com/io12/pwninit"
+repository = "https://github.com/sherlockholmestech/pwninit"
 readme = "README.md"
 keywords = ["pwn", "init", "binary", "elf", "exploit"]
 license = "MIT"
