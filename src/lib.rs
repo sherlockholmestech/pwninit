@@ -4,6 +4,7 @@ mod cpu_arch;
 mod elf;
 mod fetch_ld;
 mod fetch_libc;
+mod http_retry;
 mod libc_deb;
 mod libc_search;
 mod libc_version;
