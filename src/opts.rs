@@ -334,4 +334,120 @@ mod tests {
     fn pwn_flow_does_not_accept_extra_libs() {
         assert!(Opts::from_iter_safe(["pwninit", "--lib", "libm.so.6"]).is_err());
     }
+
+    // -------------------------------------------------------------------
+    // VAL-CLI-003: additional `fetch-libc` argument parsing coverage.
+    // -------------------------------------------------------------------
+
+    fn parse_fetch_libc(args: &[&str]) -> crate::opts::FetchLibcOpts {
+        let mut full = vec!["pwninit", "fetch-libc"];
+        full.extend_from_slice(args);
+        let opts = Opts::from_iter_safe(&full).expect("fetch-libc should parse");
+        match opts.cmd {
+            Some(Command::FetchLibc(fetch_opts)) => fetch_opts,
+            Some(Command::Rev(_)) => panic!("expected fetch-libc command, got rev"),
+            None => panic!("expected fetch-libc command, got default pwn"),
+        }
+    }
+
+    #[test]
+    fn fetch_libc_arch_amd64_parses() {
+        let fetch_opts = parse_fetch_libc(&["2.31", "--arch", "amd64"]);
+        assert_eq!(fetch_opts.arch, CpuArch::Amd64);
+        assert_eq!(fetch_opts.version, "2.31");
+    }
+
+    #[test]
+    fn fetch_libc_arch_i386_parses() {
+        let fetch_opts = parse_fetch_libc(&["2.31", "--arch", "i386"]);
+        assert_eq!(fetch_opts.arch, CpuArch::I386);
+    }
+
+    #[test]
+    fn fetch_libc_default_arch_is_amd64() {
+        let fetch_opts = parse_fetch_libc(&["2.31"]);
+        assert_eq!(fetch_opts.arch, CpuArch::Amd64);
+    }
+
+    #[test]
+    fn fetch_libc_invalid_arch_is_rejected() {
+        assert!(
+            Opts::from_iter_safe(["pwninit", "fetch-libc", "2.31", "--arch", "armhf"]).is_err(),
+            "fetch-libc should reject architectures other than amd64 and i386"
+        );
+    }
+
+    #[test]
+    fn fetch_libc_output_path_is_preserved() {
+        let fetch_opts = parse_fetch_libc(&["2.31", "--output", "my/libc/path.so"]);
+        assert_eq!(fetch_opts.output, PathBuf::from("my/libc/path.so"));
+    }
+
+    #[test]
+    fn fetch_libc_default_output_is_libc_so_6() {
+        let fetch_opts = parse_fetch_libc(&["2.31"]);
+        assert_eq!(fetch_opts.output, PathBuf::from("libc.so.6"));
+    }
+
+    #[test]
+    fn fetch_libc_positional_version_is_required() {
+        assert!(
+            Opts::from_iter_safe(["pwninit", "fetch-libc"]).is_err(),
+            "fetch-libc should require a positional version"
+        );
+    }
+
+    #[test]
+    fn fetch_libc_combined_flags_parse_together() {
+        let fetch_opts = parse_fetch_libc(&[
+            "2.31",
+            "--arch",
+            "i386",
+            "--output",
+            "libc.so.6",
+            "--lib",
+            "libm.so.6",
+            "--lib",
+            "libdl.so.2",
+        ]);
+        assert_eq!(fetch_opts.version, "2.31");
+        assert_eq!(fetch_opts.arch, CpuArch::I386);
+        assert_eq!(fetch_opts.output, PathBuf::from("libc.so.6"));
+        assert_eq!(fetch_opts.extra_libs, ["libm.so.6", "libdl.so.2"]);
+    }
+
+    #[test]
+    fn pwn_flow_does_not_accept_fetch_libc_only_flags() {
+        // `--arch` belongs to `fetch-libc`, not the pwn flow. A user
+        // passing it to the default pwn flow must get a parse error.
+        assert!(
+            Opts::from_iter_safe(["pwninit", "--arch", "amd64"]).is_err(),
+            "pwn flow should not accept --arch"
+        );
+        // `--output` is also fetch-libc-only.
+        assert!(
+            Opts::from_iter_safe(["pwninit", "--output", "libc.so.6"]).is_err(),
+            "pwn flow should not accept --output"
+        );
+    }
+
+    #[test]
+    fn rev_subcommand_does_not_accept_fetch_libc_flags() {
+        assert!(
+            Opts::from_iter_safe(["pwninit", "rev", "--lib", "libm.so.6"]).is_err(),
+            "rev should not accept --lib"
+        );
+        assert!(
+            Opts::from_iter_safe(["pwninit", "rev", "--arch", "amd64"]).is_err(),
+            "rev should not accept --arch"
+        );
+    }
+
+    #[test]
+    fn fetch_libc_lib_outside_subcommand_is_rejected() {
+        // `--lib` lives under `fetch-libc`; passing it to `rev` or to the
+        // pwn flow must fail parsing.
+        assert!(Opts::from_iter_safe(["pwninit", "rev", "--lib", "libm.so.6"]).is_err());
+        assert!(Opts::from_iter_safe(["pwninit", "--lib", "libm.so.6"]).is_err());
+    }
 }

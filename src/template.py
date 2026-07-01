@@ -6,7 +6,6 @@ from pwn import *
 
 context.binary = {bin_name}
 context.terminal = ["zellij", "action", "new-pane", "--"]
-context.gdb_binary = "/usr/bin/pwndbg"
 
 gdbscript = """
 set breakpoint pending on
@@ -17,7 +16,7 @@ continue
 
 def conn():
     if args.LOCAL:
-        r = process({proc_args})
+        r = process([exe.path], stdin=PTY, stdout=PTY)
         if args.GDB:
             gdb.attach(r, gdbscript=gdbscript)
             pause()

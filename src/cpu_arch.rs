@@ -13,7 +13,7 @@ use snafu::ResultExt;
 use snafu::Snafu;
 
 /// The CPU architectures supported by `pwninit`
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CpuArch {
     I386,
     Amd64,

@@ -73,6 +73,7 @@ pub fn fetch_ld(ver: &LibcVersion) -> Result {
 
 /// Download the linker for `ver` and save it under the canonical runtime name
 /// (`ld-linux-x86-64.so.2` or `ld-linux.so.2`).
+#[allow(dead_code)]
 pub fn fetch_ld_canonical(ver: &LibcVersion) -> Result {
     println!("{}", "fetching linker".green().bold());
     fetch_ld_to(ver, canonical_ld_name(&ver.arch))

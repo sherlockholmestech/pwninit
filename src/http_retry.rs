@@ -24,9 +24,12 @@
 
 #![allow(dead_code)]
 
+use std::borrow::Cow;
 use std::thread;
 use std::time::Duration;
 
+use reqwest::blocking::Client;
+use reqwest::Method;
 use serde::de::DeserializeOwned;
 use snafu::Snafu;
 
@@ -89,9 +92,9 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_attempts: 3,
-            initial_backoff: Duration::from_millis(250),
-            max_backoff: Duration::from_secs(2),
+            max_attempts: 6,
+            initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(10),
         }
     }
 }
@@ -192,15 +195,30 @@ where
     }
 }
 
-/// Fetch `url` and return the full response body as bytes, retrying
-/// transient failures.
-pub fn get_bytes(
+fn transfer_client() -> Result<Client> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .user_agent(concat!("pwninit/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|source| Error::Request { source })
+}
+
+fn request_bytes(
+    method: Method,
     url: &str,
+    body: Option<Cow<'_, [u8]>>,
     policy: RetryPolicy,
     sleeper: &mut dyn Sleeper,
 ) -> Result<(Vec<u8>, RetryTrace)> {
+    let client = transfer_client()?;
     retry_with_policy(policy, sleeper, || -> RetryOutcome<Vec<u8>> {
-        let resp = match reqwest::blocking::get(url) {
+        let mut req = client.request(method.clone(), url);
+        if let Some(body) = body.as_ref() {
+            req = req.body(body.clone().into_owned());
+        }
+
+        let resp = match req.send() {
             Ok(resp) => resp,
             Err(source) => {
                 return if is_retryable_error(&source) {
@@ -230,6 +248,27 @@ pub fn get_bytes(
     })
 }
 
+/// Fetch `url` and return the full response body as bytes, retrying
+/// transient failures.
+pub fn get_bytes(
+    url: &str,
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+) -> Result<(Vec<u8>, RetryTrace)> {
+    request_bytes(Method::GET, url, None, policy, sleeper)
+}
+
+/// Upload `body` to `url` with POST and return the full response body as
+/// bytes, retrying transient failures.
+pub fn post_bytes(
+    url: &str,
+    body: &[u8],
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+) -> Result<(Vec<u8>, RetryTrace)> {
+    request_bytes(Method::POST, url, Some(Cow::Borrowed(body)), policy, sleeper)
+}
+
 /// Fetch `url` and decode the response body as JSON into `T`, retrying
 /// transient failures.
 ///
@@ -245,8 +284,9 @@ pub fn get_json<T>(
 where
     T: DeserializeOwned,
 {
+    let client = transfer_client()?;
     retry_with_policy(policy, sleeper, || -> RetryOutcome<T> {
-        let resp = match reqwest::blocking::get(url) {
+        let resp = match client.get(url).send() {
             Ok(resp) => resp,
             Err(source) => {
                 return if is_retryable_error(&source) {

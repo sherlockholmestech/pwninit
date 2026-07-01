@@ -7,7 +7,7 @@ use colored::Colorize;
 use serde::Deserialize;
 use snafu::Snafu;
 
-const LAUNCHPAD_API_BASE: &str = "https://api.launchpad.net/1.0/ubuntu/+archive/primary";
+pub(crate) const LAUNCHPAD_API_BASE: &str = "https://api.launchpad.net/1.0/ubuntu/+archive/primary";
 const LAUNCHPAD_PAGE_SIZE: &str = "300";
 
 fn launchpad_api_url_with_base(base: &str) -> String {
@@ -52,6 +52,7 @@ struct Entry {
 /// Return all published libc6 versions whose version string starts with
 /// `short_version` followed by `-`, matching the given architecture.
 /// Results are deduplicated and sorted in ascending order.
+#[allow(dead_code)]
 pub fn search_versions(short_version: &str, arch: &CpuArch) -> Result<Vec<String>> {
     let policy = RetryPolicy::default();
     let mut sleeper = StdSleeper;

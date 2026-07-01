@@ -6,7 +6,7 @@ use crate::libc_search;
 use crate::libc_version::LibcVersion;
 
 use std::collections::HashSet;
-use std::io::{self, BufRead, Write};
+use std::io;
 use std::path::Path;
 
 use colored::Colorize;
@@ -169,31 +169,68 @@ pub fn fetch_libc_interactive(
     out_path: &Path,
     extra_libs: &[String],
 ) -> Result {
-    let versions = libc_search::search_versions(short_version, &arch).context(SearchSnafu)?;
+    let mut sleeper = StdSleeper;
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    fetch_libc_interactive_with(
+        short_version,
+        arch,
+        out_path,
+        Path::new("."),
+        extra_libs,
+        libc_search::LAUNCHPAD_API_BASE,
+        libc_deb::PKG_URL,
+        RetryPolicy::default(),
+        &mut sleeper,
+        &mut input,
+        &mut io::stdout(),
+    )
+}
+
+/// Same as [`fetch_libc_interactive`] but lets callers inject every external
+/// surface: the directory the linker and extra libraries are written to, the
+/// Launchpad API base URL, the package download base URL, the retry policy,
+/// the sleeper, the stdin source, and the stdout sink. Used by tests to
+/// drive a local fake server with deterministic responses, verify that the
+/// single-match flow does not read from stdin, and verify that the
+/// multi-match flow honors the supplied selection and retries only the
+/// failed HTTP operation.
+pub(crate) fn fetch_libc_interactive_with(
+    short_version: &str,
+    arch: CpuArch,
+    out_path: &Path,
+    out_dir: &Path,
+    extra_libs: &[String],
+    api_base: &str,
+    pkg_base: &str,
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+    input: &mut dyn io::BufRead,
+    output: &mut dyn io::Write,
+) -> Result {
+    let versions = libc_search::search_versions_with(short_version, &arch, api_base, policy, sleeper)
+        .context(SearchSnafu)?;
 
     if versions.is_empty() {
         return Err(Error::NoVersionsFound);
     }
 
     let choice = if versions.len() == 1 {
-        println!("  {}", versions[0].bold());
+        writeln!(output, "  {}", versions[0]).ok();
         0
     } else {
-        println!();
+        writeln!(output).ok();
         for (i, v) in versions.iter().enumerate() {
-            println!("  {}  {}", format!("[{}]", i + 1).bold(), v);
+            writeln!(output, "  {}  {}", format!("[{}]", i + 1), v).ok();
         }
-        println!();
+        writeln!(output).ok();
 
         loop {
-            print!("{}", "select version: ".bold());
-            io::stdout().flush().context(StdinSnafu)?;
+            write!(output, "select version: ").ok();
+            output.flush().ok();
 
             let mut line = String::new();
-            io::stdin()
-                .lock()
-                .read_line(&mut line)
-                .context(StdinSnafu)?;
+            input.read_line(&mut line).context(StdinSnafu)?;
 
             let trimmed = line.trim();
             if let Ok(n) = trimmed.parse::<usize>() {
@@ -201,10 +238,12 @@ pub fn fetch_libc_interactive(
                     break n - 1;
                 }
             }
-            eprintln!(
-                "{}",
-                format!("please enter a number between 1 and {}", versions.len()).red()
-            );
+            writeln!(
+                output,
+                "please enter a number between 1 and {}",
+                versions.len()
+            )
+            .ok();
         }
     };
 
@@ -212,9 +251,14 @@ pub fn fetch_libc_interactive(
     let ver = LibcVersion::from_parts(full_version, arch).context(VersionSnafu)?;
     let extra_libs = normalize_extra_libs(extra_libs)?;
 
-    fetch_libc(&ver, out_path)?;
-    fetch_ld::fetch_ld_canonical(&ver).context(FetchLdSnafu)?;
-    fetch_extra_libs(&ver, &extra_libs)?;
+    fetch_libc_package_file_with(&ver, LIBC_SONAME, out_path, pkg_base, policy, sleeper)?;
+    let linker_out = out_dir.join(fetch_ld::canonical_ld_name(&ver.arch));
+    fetch_ld::fetch_ld_to_with(&ver, &linker_out, pkg_base, policy, sleeper)
+        .context(FetchLdSnafu)?;
+    for extra_lib in &extra_libs {
+        let lib_out = out_dir.join(extra_lib);
+        fetch_libc_package_file_with(&ver, extra_lib, &lib_out, pkg_base, policy, sleeper)?;
+    }
     Ok(())
 }
 
@@ -231,13 +275,6 @@ fn normalize_extra_libs(extra_libs: &[String]) -> std::result::Result<Vec<&str>,
     }
 
     Ok(normalized)
-}
-
-fn fetch_extra_libs(ver: &LibcVersion, extra_libs: &[&str]) -> Result {
-    for extra_lib in extra_libs {
-        fetch_libc_lib(ver, extra_lib)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -626,4 +663,461 @@ mod tests {
         assert_eq!(std::fs::read(&libm_path).expect("read libm"), b"libm bytes");
         assert_eq!(server.remaining(), 0);
     }
+
+    // -------------------------------------------------------------------
+    // VAL-CROSS-001 / VAL-CROSS-004 / VAL-DOWNLOAD-011: full
+    // `fetch_libc_interactive` flow tests.
+    //
+    // The fake server is shared between the Launchpad JSON page fetches
+    // and the Ubuntu deb fetches. The path of the URL is ignored, so the
+    // queue is consumed in declaration order: 1) lookup page, 2) libc
+    // deb, 3) linker deb, 4) each extra lib deb.
+    // -------------------------------------------------------------------
+
+    /// Build a one-page Launchpad API JSON body with the given (version,
+    /// arch) tuples.
+    fn launchpad_page(entries: &[(&str, &str)]) -> String {
+        let entries_json: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(v, arch)| {
+                serde_json::json!({
+                    "binary_package_version": v,
+                    "distro_arch_series_link": format!(
+                        "https://api.launchpad.net/1.0/ubuntu/+archive/primary/{}",
+                        arch
+                    ),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "entries": entries_json,
+            "next_collection_link": serde_json::Value::Null,
+        })
+        .to_string()
+    }
+
+    /// Build a deb that contains all of the given (path, content) entries
+    /// in a single `data.tar.gz`.
+    fn make_tiny_deb_gz_multi(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut data_tar_gz = Vec::new();
+        {
+            let enc = GzEncoder::new(&mut data_tar_gz, Compression::default());
+            let mut tar_builder = tar::Builder::new(enc);
+            for (path, content) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(path).expect("set tar path");
+                header.set_size(content.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                tar_builder
+                    .append(&header, *content)
+                    .expect("append tar entry");
+            }
+            tar_builder.finish().expect("finish tar");
+        }
+        let mut deb = Vec::new();
+        {
+            let mut builder = ar::Builder::new(&mut deb);
+            let debian_binary: &[u8] = b"2.0\n";
+            let header = ar::Header::new(b"debian-binary".to_vec(), debian_binary.len() as u64);
+            builder
+                .append(&header, debian_binary)
+                .expect("append debian-binary");
+            let header = ar::Header::new(b"data.tar.gz".to_vec(), data_tar_gz.len() as u64);
+            builder
+                .append(&header, data_tar_gz.as_slice())
+                .expect("append data.tar.gz");
+        }
+        deb
+    }
+
+    /// VAL-CROSS-001: the single-match `fetch-libc` flow runs all four
+    /// operations (lookup, libc, linker, deduplicated extras) without
+    /// reading from stdin and writes the expected output files.
+    ///
+    /// The deb fetched for each operation is the same package, so a
+    /// single deb body is queued four times: one each for the libc,
+    /// linker, and the two deduplicated extra libraries.
+    #[test]
+    fn fetch_libc_interactive_single_match_writes_all_outputs_without_stdin() {
+        let deb = make_tiny_deb_gz_multi(&[
+            ("libc.so.6", b"libc bytes"),
+            ("ld-linux-x86-64.so.2", b"linker bytes"),
+            ("libm.so.6", b"libm bytes"),
+            ("libdl.so.2", b"libdl bytes"),
+        ]);
+        let server = ScriptedServer::with(vec![
+            ScriptedResponse::Body(
+                launchpad_page(&[("2.34-0ubuntu3", "amd64")]).into_bytes(),
+            ),
+            ScriptedResponse::Body(deb.clone()),
+            ScriptedResponse::Body(deb.clone()),
+            ScriptedResponse::Body(deb.clone()),
+            ScriptedResponse::Body(deb),
+        ]);
+
+        let mut sleeper = RecordingSleeper::default();
+        // Empty stdin: the cursor never advances, proving that the
+        // single-match flow does not call `read_line`.
+        let mut input = std::io::Cursor::new(b"" as &[u8]);
+        let mut output = Vec::<u8>::new();
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let libc_out = tmp.path().join("libc.so.6");
+        let extra_libs = vec![
+            "libm".to_string(),
+            "libm.so.6".to_string(),
+            "libdl.so.2".to_string(),
+        ];
+
+        fetch_libc_interactive_with(
+            "2.34",
+            CpuArch::Amd64,
+            &libc_out,
+            tmp.path(),
+            &extra_libs,
+            &server.base_url,
+            &server.base_url,
+            fast_policy(),
+            &mut sleeper,
+            &mut input,
+            &mut output,
+        )
+        .expect("single-match flow should succeed");
+
+        // All expected output files exist.
+        assert_eq!(
+            std::fs::read(&libc_out).expect("read libc"),
+            b"libc bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2"))
+                .expect("read linker"),
+            b"linker bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("libm.so.6")).expect("read libm"),
+            b"libm bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("libdl.so.2")).expect("read libdl"),
+            b"libdl bytes"
+        );
+
+        // The single-match flow does not read from stdin.
+        assert_eq!(
+            input.position(),
+            0,
+            "single-match flow must not read from stdin"
+        );
+
+        // The output does not contain the selection prompt.
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            !output_str.contains("select version"),
+            "single-match flow must not show the selection prompt, got: {}",
+            output_str
+        );
+
+        // All five operations were requested (no retries on the happy
+        // path): 1 lookup + 4 deb fetches (libc, linker, libm, libdl).
+        assert_eq!(server.remaining(), 0);
+        assert!(
+            sleeper.sleeps.is_empty(),
+            "no backoffs expected on the happy path"
+        );
+    }
+
+    /// VAL-CROSS-001: retry is applied to every HTTP operation in the
+    /// single-match flow. Each of the four deb steps gets a transient
+    /// failure first and a successful response second; the lookup page
+    /// succeeds on the first attempt.
+    #[test]
+    fn fetch_libc_interactive_single_match_retries_each_failed_operation() {
+        let deb = make_tiny_deb_gz_multi(&[
+            ("libc.so.6", b"libc bytes"),
+            ("ld-linux-x86-64.so.2", b"linker bytes"),
+            ("libm.so.6", b"libm bytes"),
+        ]);
+        let server = ScriptedServer::with(vec![
+            ScriptedResponse::Body(
+                launchpad_page(&[("2.34-0ubuntu3", "amd64")]).into_bytes(),
+            ),
+            // libc deb: transient then success
+            ScriptedResponse::status(503, b""),
+            ScriptedResponse::Body(deb.clone()),
+            // linker deb: transient then success
+            ScriptedResponse::status(503, b""),
+            ScriptedResponse::Body(deb.clone()),
+            // libm deb: transient then success
+            ScriptedResponse::status(503, b""),
+            ScriptedResponse::Body(deb),
+        ]);
+
+        let mut sleeper = RecordingSleeper::default();
+        let mut input = std::io::Cursor::new(b"" as &[u8]);
+        let mut output = Vec::<u8>::new();
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let libc_out = tmp.path().join("libc.so.6");
+        let extra_libs = vec!["libm.so.6".to_string()];
+
+        fetch_libc_interactive_with(
+            "2.34",
+            CpuArch::Amd64,
+            &libc_out,
+            tmp.path(),
+            &extra_libs,
+            &server.base_url,
+            &server.base_url,
+            fast_policy(),
+            &mut sleeper,
+            &mut input,
+            &mut output,
+        )
+        .expect("single-match flow should succeed after retries");
+
+        // Each deb operation was retried exactly once (3 retries total).
+        assert_eq!(sleeper.sleeps.len(), 3, "expected one backoff per step");
+
+        // All output files are written.
+        assert_eq!(
+            std::fs::read(&libc_out).expect("read libc"),
+            b"libc bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2"))
+                .expect("read linker"),
+            b"linker bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("libm.so.6")).expect("read libm"),
+            b"libm bytes"
+        );
+
+        // All scripted responses were consumed.
+        assert_eq!(server.remaining(), 0);
+
+        // No stdin read.
+        assert_eq!(input.position(), 0);
+    }
+
+    /// VAL-CROSS-004: the multi-match flow shows the prompt exactly once,
+    /// honors the supplied stdin selection, and downloads the chosen
+    /// version's packages.
+    #[test]
+    fn fetch_libc_interactive_multi_match_prompts_once_and_honors_stdin() {
+        let deb_234_3 = make_tiny_deb_gz_multi(&[
+            ("libc.so.6", b"libc 2.34-3 bytes"),
+            ("ld-linux-x86-64.so.2", b"linker 2.34-3 bytes"),
+            ("libm.so.6", b"libm 2.34-3 bytes"),
+        ]);
+        let deb_234_9 = make_tiny_deb_gz_multi(&[
+            ("libc.so.6", b"libc 2.34-9 bytes"),
+            ("ld-linux-x86-64.so.2", b"linker 2.34-9 bytes"),
+            ("libm.so.6", b"libm 2.34-9 bytes"),
+        ]);
+
+        // The user picks the SECOND version (`2.34-0ubuntu9`). The
+        // queued debs for that version are served for each deb fetch.
+        // We also queue a deb for the first version, but it should
+        // never be requested because the user did not select it.
+        let server = ScriptedServer::with(vec![
+            ScriptedResponse::Body(
+                launchpad_page(&[
+                    ("2.34-0ubuntu3", "amd64"),
+                    ("2.34-0ubuntu9", "amd64"),
+                ])
+                .into_bytes(),
+            ),
+            ScriptedResponse::Body(deb_234_9.clone()),
+            ScriptedResponse::Body(deb_234_9.clone()),
+            ScriptedResponse::Body(deb_234_9),
+            // Sentinel: the unselected version's deb must never be
+            // requested, so we queue it last and assert that the
+            // remaining count is 1 after the flow completes.
+            ScriptedResponse::Body(deb_234_3),
+        ]);
+
+        let mut sleeper = RecordingSleeper::default();
+        let mut input = std::io::Cursor::new(b"2\n".to_vec());
+        let mut output = Vec::<u8>::new();
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let libc_out = tmp.path().join("libc.so.6");
+        let extra_libs = vec!["libm.so.6".to_string()];
+
+        fetch_libc_interactive_with(
+            "2.34",
+            CpuArch::Amd64,
+            &libc_out,
+            tmp.path(),
+            &extra_libs,
+            &server.base_url,
+            &server.base_url,
+            fast_policy(),
+            &mut sleeper,
+            &mut input,
+            &mut output,
+        )
+        .expect("multi-match flow should succeed");
+
+        // The chosen version is the second one (2.34-0ubuntu9), and
+        // the deb files for that version were extracted.
+        assert_eq!(
+            std::fs::read(&libc_out).expect("read libc"),
+            b"libc 2.34-9 bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2"))
+                .expect("read linker"),
+            b"linker 2.34-9 bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("libm.so.6")).expect("read libm"),
+            b"libm 2.34-9 bytes"
+        );
+
+        // The prompt was shown exactly once.
+        let output_str = String::from_utf8_lossy(&output);
+        let prompt_count = output_str.matches("select version").count();
+        assert_eq!(
+            prompt_count, 1,
+            "prompt must occur exactly once, got {}",
+            prompt_count
+        );
+
+        // The deb for the unselected version (2.34-0ubuntu3) was
+        // never fetched, proving that retries and downloads only
+        // target the chosen version.
+        assert_eq!(
+            server.remaining(),
+            1,
+            "unselected version's deb must not be requested"
+        );
+    }
+
+    /// VAL-CROSS-004: invalid input causes the prompt to repeat without
+    /// triggering a re-fetch of the lookup page.
+    #[test]
+    fn fetch_libc_interactive_multi_match_retries_prompt_for_invalid_input_only() {
+        let deb = make_tiny_deb_gz_multi(&[
+            ("libc.so.6", b"libc bytes"),
+            ("ld-linux-x86-64.so.2", b"linker bytes"),
+        ]);
+        let server = ScriptedServer::with(vec![
+            ScriptedResponse::Body(
+                launchpad_page(&[
+                    ("2.34-0ubuntu3", "amd64"),
+                    ("2.34-0ubuntu9", "amd64"),
+                ])
+                .into_bytes(),
+            ),
+            ScriptedResponse::Body(deb.clone()),
+            ScriptedResponse::Body(deb),
+        ]);
+
+        let mut sleeper = RecordingSleeper::default();
+        // First line is invalid (non-numeric), second is a number
+        // outside the range, third is the valid choice.
+        let mut input = std::io::Cursor::new(b"abc\n9\n1\n".to_vec());
+        let mut output = Vec::<u8>::new();
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let libc_out = tmp.path().join("libc.so.6");
+        let extra_libs: Vec<String> = vec![];
+
+        fetch_libc_interactive_with(
+            "2.34",
+            CpuArch::Amd64,
+            &libc_out,
+            tmp.path(),
+            &extra_libs,
+            &server.base_url,
+            &server.base_url,
+            fast_policy(),
+            &mut sleeper,
+            &mut input,
+            &mut output,
+        )
+        .expect("multi-match flow should succeed after invalid input");
+
+        // The lookup page was fetched exactly once (no re-fetch on
+        // invalid input).
+        assert_eq!(server.remaining(), 0);
+        // The prompt appeared three times (one for each input line).
+        let output_str = String::from_utf8_lossy(&output);
+        assert_eq!(output_str.matches("select version").count(), 3);
+    }
+
+    /// VAL-DOWNLOAD-011: a transient package failure after a successful
+    /// multi-match lookup retries only the failed package download, not
+    /// the prompt or the lookup.
+    #[test]
+    fn fetch_libc_interactive_retry_does_not_repeat_prompt_or_lookup() {
+        let deb = make_tiny_deb_gz_multi(&[
+            ("libc.so.6", b"libc bytes"),
+            ("ld-linux-x86-64.so.2", b"linker bytes"),
+        ]);
+        // 1) lookup page succeeds
+        // 2) libc deb gets 503
+        // 3) libc deb succeeds
+        // 4) linker deb succeeds
+        let server = ScriptedServer::with(vec![
+            ScriptedResponse::Body(
+                launchpad_page(&[
+                    ("2.34-0ubuntu3", "amd64"),
+                    ("2.34-0ubuntu9", "amd64"),
+                ])
+                .into_bytes(),
+            ),
+            ScriptedResponse::status(503, b""),
+            ScriptedResponse::Body(deb.clone()),
+            ScriptedResponse::Body(deb),
+        ]);
+
+        let mut sleeper = RecordingSleeper::default();
+        // User picks the first version (2.34-0ubuntu3). If the lookup
+        // were re-fetched, the prompt would be re-displayed and the user
+        // would have to re-enter the choice.
+        let mut input = std::io::Cursor::new(b"1\n".to_vec());
+        let mut output = Vec::<u8>::new();
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let libc_out = tmp.path().join("libc.so.6");
+        let extra_libs: Vec<String> = vec![];
+
+        fetch_libc_interactive_with(
+            "2.34",
+            CpuArch::Amd64,
+            &libc_out,
+            tmp.path(),
+            &extra_libs,
+            &server.base_url,
+            &server.base_url,
+            fast_policy(),
+            &mut sleeper,
+            &mut input,
+            &mut output,
+        )
+        .expect("flow should succeed after retrying libc download only");
+
+        // The prompt was shown exactly once, proving the lookup and
+        // prompt were not repeated.
+        let output_str = String::from_utf8_lossy(&output);
+        assert_eq!(
+            output_str.matches("select version").count(),
+            1,
+            "prompt must not repeat, got: {}",
+            output_str
+        );
+        // The libc file is the bytes from the second attempt.
+        assert_eq!(
+            std::fs::read(&libc_out).expect("read libc"),
+            b"libc bytes"
+        );
+        // Exactly one backoff: the retry on the libc download.
+        assert_eq!(sleeper.sleeps.len(), 1, "only one retry expected");
+    }
 }
+
