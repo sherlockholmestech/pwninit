@@ -61,8 +61,8 @@ pub enum Error {
     #[snafu(display("HTTP request returned retryable status: {}", status))]
     RetryableStatus { status: reqwest::StatusCode },
 
-    #[snafu(display("failed to parse response body: {}", source))]
-    Parse { source: reqwest::Error },
+    #[snafu(display("failed to parse response body: {}", message))]
+    Parse { message: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -215,10 +215,12 @@ pub fn get_bytes(
         if status.is_success() {
             match resp.bytes() {
                 Ok(bytes) => RetryOutcome::Success(bytes.to_vec()),
-                Err(source) if is_retryable_error(&source) => {
-                    RetryOutcome::Transient(Error::Request { source })
-                }
-                Err(source) => RetryOutcome::Permanent(Error::Request { source }),
+                // `resp.bytes()` in reqwest 0.13.2 wraps every error as
+                // `Kind::Decode` (via `crate::error::decode`), including
+                // body read failures like truncated bodies and connection
+                // drops. All such errors are body read errors, so we
+                // retry them as transient failures.
+                Err(source) => RetryOutcome::Transient(Error::Request { source }),
             }
         } else if is_retryable_status(status) {
             RetryOutcome::Transient(Error::RetryableStatus { status })
@@ -231,8 +233,10 @@ pub fn get_bytes(
 /// Fetch `url` and decode the response body as JSON into `T`, retrying
 /// transient failures.
 ///
-/// JSON parse failures (and any other decoding failures) are treated as
-/// permanent errors and are never retried.
+/// The response body is read into memory first so that body read failures
+/// (such as a truncated response) are classified as transient and retried.
+/// JSON parse failures on a complete body are permanent and are never
+/// retried.
 pub fn get_json<T>(
     url: &str,
     policy: RetryPolicy,
@@ -255,12 +259,24 @@ where
 
         let status = resp.status();
         if status.is_success() {
-            match resp.json::<T>() {
+            // Read the full body first so a truncated body (which reqwest
+            // classifies as `Decode` from the `bytes()` call) is a
+            // transient retryable error, distinct from a complete body
+            // that fails to parse as JSON.
+            let bytes = match resp.bytes() {
+                Ok(bytes) => bytes,
+                // `resp.bytes()` in reqwest 0.13.2 wraps every error as
+                // `Kind::Decode` (via `crate::error::decode`), including
+                // body read failures like truncated bodies and connection
+                // drops. All such errors are body read errors, so we
+                // retry them as transient failures.
+                Err(source) => return RetryOutcome::Transient(Error::Request { source }),
+            };
+            match serde_json::from_slice::<T>(&bytes) {
                 Ok(value) => RetryOutcome::Success(value),
-                Err(source) if is_retryable_error(&source) => {
-                    RetryOutcome::Transient(Error::Request { source })
-                }
-                Err(source) => RetryOutcome::Permanent(Error::Parse { source }),
+                Err(source) => RetryOutcome::Permanent(Error::Parse {
+                    message: source.to_string(),
+                }),
             }
         } else if is_retryable_status(status) {
             RetryOutcome::Transient(Error::RetryableStatus { status })
