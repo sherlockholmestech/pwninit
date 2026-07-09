@@ -108,7 +108,7 @@ fn cstr_slot_len(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 fn logical_lib_name(name: &str) -> Option<String> {
-    if name.starts_with("ld-") || name.starts_with("ld-linux") {
+    if name.starts_with("ld-") || name.starts_with("ld-linux") || name.starts_with("ld-musl") {
         return Some("ld".to_string());
     }
     // Match "libc.so.6", "libc-2.31.so", etc. but NOT "libcrypto", "libcap", ...
@@ -510,6 +510,10 @@ mod tests {
         assert_eq!(logical_lib_name("ld-2.31.so").as_deref(), Some("ld"));
         assert_eq!(
             logical_lib_name("ld-linux-x86-64.so.2").as_deref(),
+            Some("ld")
+        );
+        assert_eq!(
+            logical_lib_name("ld-musl-x86_64.so.1").as_deref(),
             Some("ld")
         );
         assert_eq!(logical_lib_name("libc.so.6").as_deref(), Some("libc"));

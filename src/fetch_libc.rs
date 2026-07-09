@@ -1,4 +1,5 @@
 use crate::cpu_arch::CpuArch;
+use crate::docker_libc;
 use crate::fetch_ld;
 use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
 use crate::libc_deb;
@@ -35,6 +36,17 @@ pub enum Error {
 
     #[snafu(display("invalid extra libc library name: {}", name))]
     InvalidExtraLibName { name: String },
+
+    #[snafu(display("fetch-libc launchpad source requires a glibc version argument"))]
+    MissingLaunchpadVersion,
+
+    #[snafu(display(
+        "fetch-libc docker source requires either --image or both --distro and --release"
+    ))]
+    MissingDockerImage,
+
+    #[snafu(display("docker libc extraction error: {}", source))]
+    Docker { source: docker_libc::Error },
 }
 
 pub type Result<T = ()> = std::result::Result<T, Error>;
@@ -161,6 +173,31 @@ pub fn fetch_libpthread(ver: &LibcVersion) -> Result {
     fetch_libc_lib(ver, LIBPTHREAD_SONAME)
 }
 
+pub fn docker_image_name(
+    image: Option<&str>,
+    distro: Option<&str>,
+    release: Option<&str>,
+) -> Result<String> {
+    if let Some(image) = image {
+        return Ok(image.to_string());
+    }
+
+    match (distro, release) {
+        (Some(distro), Some(release)) => Ok(format!("{}:{}", distro, release)),
+        _ => Err(Error::MissingDockerImage),
+    }
+}
+
+pub fn fetch_libc_from_docker(
+    image: &str,
+    arch: CpuArch,
+    out_path: &Path,
+    extra_libs: &[String],
+) -> Result {
+    let extra_libs = normalize_extra_libs(extra_libs)?;
+    docker_libc::extract_libc_files(image, arch, out_path, &extra_libs).context(DockerSnafu)
+}
+
 /// Search for available libc6 versions matching `short_version`, prompt the
 /// user to select one, then download it to `out_path`.
 pub fn fetch_libc_interactive(
@@ -264,7 +301,7 @@ pub(crate) fn fetch_libc_interactive_with(
     Ok(())
 }
 
-fn normalize_extra_libs(extra_libs: &[String]) -> std::result::Result<Vec<&str>, Error> {
+pub(crate) fn normalize_extra_libs(extra_libs: &[String]) -> std::result::Result<Vec<&str>, Error> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
 
@@ -350,6 +387,32 @@ mod tests {
             normalize_extra_libs(&extra_libs).expect("valid extra libs"),
             ["libm.so.6", "libdl.so.2"]
         );
+    }
+
+    #[test]
+    fn docker_image_name_uses_explicit_image_first() {
+        let image = docker_image_name(Some("ubuntu:22.04"), Some("debian"), Some("bookworm"))
+            .expect("explicit image should resolve");
+
+        assert_eq!(image, "ubuntu:22.04");
+    }
+
+    #[test]
+    fn docker_image_name_builds_from_distro_and_release() {
+        let image = docker_image_name(None, Some("debian"), Some("bookworm"))
+            .expect("distro/release should resolve");
+
+        assert_eq!(image, "debian:bookworm");
+    }
+
+    #[test]
+    fn docker_image_name_requires_image_or_distro_release() {
+        let err = docker_image_name(None, Some("ubuntu"), None).expect_err("missing release");
+
+        match err {
+            Error::MissingDockerImage => {}
+            other => panic!("expected MissingDockerImage, got {:?}", other),
+        }
     }
 
     #[test]

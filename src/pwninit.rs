@@ -1,7 +1,7 @@
 use crate::fetch_libc;
 use crate::maybe_visit_libc;
 use crate::needed_glibc_libraries;
-use crate::opts::{self, Command, Opts};
+use crate::opts::{self, Command, FetchLibcSource, Opts};
 use crate::patch_bin;
 use crate::set_bin_exec_pwn;
 use crate::set_bin_exec_rev;
@@ -48,13 +48,35 @@ fn run_fetch_libc(
     let mut extra_libs = fetch_opts.extra_libs;
     extra_libs.extend(needed_glibc_libraries(&pwn_opts));
 
-    fetch_libc::fetch_libc_interactive(
-        &fetch_opts.version,
-        fetch_opts.arch,
-        &fetch_opts.output,
-        &extra_libs,
-    )
-    .context(FetchLibcSnafu)?;
+    match fetch_opts.source {
+        FetchLibcSource::Launchpad => {
+            let Some(version) = fetch_opts.version.as_deref() else {
+                return Err(fetch_libc::Error::MissingLaunchpadVersion).context(FetchLibcSnafu);
+            };
+            fetch_libc::fetch_libc_interactive(
+                version,
+                fetch_opts.arch,
+                &fetch_opts.output,
+                &extra_libs,
+            )
+            .context(FetchLibcSnafu)?;
+        }
+        FetchLibcSource::Docker => {
+            let image = fetch_libc::docker_image_name(
+                fetch_opts.image.as_deref(),
+                fetch_opts.distro.as_deref(),
+                fetch_opts.release.as_deref(),
+            )
+            .context(FetchLibcSnafu)?;
+            fetch_libc::fetch_libc_from_docker(
+                &image,
+                fetch_opts.arch,
+                &fetch_opts.output,
+                &extra_libs,
+            )
+            .context(FetchLibcSnafu)?;
+        }
+    }
 
     if pwn_opts.bin.is_some() {
         pwn_opts.libc = Some(libc_output);

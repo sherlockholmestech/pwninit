@@ -8,6 +8,7 @@ use crate::is_libc;
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use colored::Color;
 use colored::Colorize;
@@ -22,6 +23,27 @@ use structopt::StructOpt;
 pub enum PatchMode {
     Patchelf,
     Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchLibcSource {
+    Launchpad,
+    Docker,
+}
+
+impl FromStr for FetchLibcSource {
+    type Err = String;
+
+    fn from_str(source: &str) -> std::result::Result<Self, Self::Err> {
+        match source {
+            "launchpad" => Ok(Self::Launchpad),
+            "docker" => Ok(Self::Docker),
+            _ => Err(format!(
+                "unknown fetch source: {}, expected launchpad or docker",
+                source
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -163,8 +185,16 @@ pub struct RevOpts {
 /// Options for downloading a libc by version
 #[derive(StructOpt, Clone)]
 pub struct FetchLibcOpts {
-    /// glibc version to download, e.g. "2.31"
-    pub version: String,
+    /// glibc version to download from Launchpad, e.g. "2.31"
+    pub version: Option<String>,
+
+    /// libc fetch backend
+    #[structopt(
+        long,
+        default_value = "launchpad",
+        possible_values = &["launchpad", "docker"]
+    )]
+    pub source: FetchLibcSource,
 
     /// Target architecture
     #[structopt(long, default_value = "amd64", possible_values = &["amd64", "i386"])]
@@ -177,6 +207,18 @@ pub struct FetchLibcOpts {
     /// Additional libc package library to download (repeatable; accepts sonames like libm.so.6)
     #[structopt(long = "lib", value_name = "NAME")]
     pub extra_libs: Vec<String>,
+
+    /// Docker image to extract libc files from, e.g. ubuntu:22.04
+    #[structopt(long)]
+    pub image: Option<String>,
+
+    /// Docker image distro name, used with --release, e.g. ubuntu
+    #[structopt(long)]
+    pub distro: Option<String>,
+
+    /// Docker image distro release/tag, used with --distro, e.g. 22.04
+    #[structopt(long)]
+    pub release: Option<String>,
 }
 
 impl Default for PwnOpts {
@@ -357,7 +399,7 @@ mod tests {
     fn fetch_libc_arch_amd64_parses() {
         let fetch_opts = parse_fetch_libc(&["2.31", "--arch", "amd64"]);
         assert_eq!(fetch_opts.arch, CpuArch::Amd64);
-        assert_eq!(fetch_opts.version, "2.31");
+        assert_eq!(fetch_opts.version.as_deref(), Some("2.31"));
     }
 
     #[test]
@@ -394,10 +436,9 @@ mod tests {
 
     #[test]
     fn fetch_libc_positional_version_is_required() {
-        assert!(
-            Opts::from_iter_safe(["pwninit", "fetch-libc"]).is_err(),
-            "fetch-libc should require a positional version"
-        );
+        let fetch_opts = parse_fetch_libc(&[]);
+        assert_eq!(fetch_opts.source, FetchLibcSource::Launchpad);
+        assert!(fetch_opts.version.is_none());
     }
 
     #[test]
@@ -413,10 +454,33 @@ mod tests {
             "--lib",
             "libdl.so.2",
         ]);
-        assert_eq!(fetch_opts.version, "2.31");
+        assert_eq!(fetch_opts.version.as_deref(), Some("2.31"));
         assert_eq!(fetch_opts.arch, CpuArch::I386);
         assert_eq!(fetch_opts.output, PathBuf::from("libc.so.6"));
         assert_eq!(fetch_opts.extra_libs, ["libm.so.6", "libdl.so.2"]);
+    }
+
+    #[test]
+    fn fetch_libc_docker_image_source_parses_without_version() {
+        let fetch_opts = parse_fetch_libc(&["--source", "docker", "--image", "ubuntu:22.04"]);
+        assert_eq!(fetch_opts.source, FetchLibcSource::Docker);
+        assert!(fetch_opts.version.is_none());
+        assert_eq!(fetch_opts.image.as_deref(), Some("ubuntu:22.04"));
+    }
+
+    #[test]
+    fn fetch_libc_docker_distro_release_source_parses() {
+        let fetch_opts = parse_fetch_libc(&[
+            "--source",
+            "docker",
+            "--distro",
+            "debian",
+            "--release",
+            "bookworm",
+        ]);
+        assert_eq!(fetch_opts.source, FetchLibcSource::Docker);
+        assert_eq!(fetch_opts.distro.as_deref(), Some("debian"));
+        assert_eq!(fetch_opts.release.as_deref(), Some("bookworm"));
     }
 
     #[test]

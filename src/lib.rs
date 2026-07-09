@@ -1,6 +1,7 @@
 //! Utility functions that provide the bulk of `pwninit` functionality
 
 mod cpu_arch;
+mod docker_libc;
 mod elf;
 mod fetch_ld;
 mod fetch_libc;
@@ -41,6 +42,12 @@ use ex::io;
 use is_executable::IsExecutable;
 use snafu::ResultExt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibcFamily {
+    Gnu,
+    Musl,
+}
+
 /// Detect if `path` is the provided pwn binary
 pub fn is_bin(path: &Path) -> elf::detect::Result<bool> {
     let is_patched = path
@@ -61,12 +68,12 @@ fn path_name_starts_with(path: &Path, prefixes: &[&str]) -> bool {
 
 /// Detect if `path` is the provided libc
 pub fn is_libc(path: &Path) -> elf::detect::Result<bool> {
-    Ok(is_elf(path)? && path_name_starts_with(path, &["libc.", "libc-"]))
+    Ok(is_elf(path)? && path_name_starts_with(path, &["libc.", "libc-", "ld-musl"]))
 }
 
 /// Detect if `path` is the provided linker
 pub fn is_ld(path: &Path) -> elf::detect::Result<bool> {
-    Ok(is_elf(path)? && path_name_starts_with(path, &["ld-", "ld-linux"]))
+    Ok(is_elf(path)? && path_name_starts_with(path, &["ld-", "ld-linux", "ld-musl"]))
 }
 
 /// Same as `fetch_ld()`, but doesn't do anything if an existing linker is
@@ -139,10 +146,43 @@ fn maybe_fetch_needed_libs(opts: &PwnOpts, ver: &LibcVersion) {
     }
 }
 
+fn detect_libc_family(libc: &Path) -> LibcFamily {
+    let file_name = libc
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if file_name.starts_with("ld-musl") || file_name.starts_with("libc.musl") {
+        return LibcFamily::Musl;
+    }
+
+    match ex::fs::read(libc) {
+        Ok(bytes)
+            if bytes
+                .windows(b"musl".len())
+                .any(|window| window.eq_ignore_ascii_case(b"musl")) =>
+        {
+            LibcFamily::Musl
+        }
+        _ => LibcFamily::Gnu,
+    }
+}
+
 /// Top-level function for libc-dependent tasks
 ///   1. Download linker if not found
 ///   2. Unstrip libc if libc is stripped
 fn visit_libc(opts: &PwnOpts, libc: &Path) {
+    if detect_libc_family(libc) == LibcFamily::Musl {
+        println!(
+            "{}",
+            format!(
+                "detected musl libc {}; skipping glibc-specific fetch/unstrip",
+                libc.to_string_lossy().bold()
+            )
+            .yellow()
+        );
+        return;
+    }
+
     let ver = match LibcVersion::detect(libc) {
         Ok(ver) => ver,
         Err(err) => {
@@ -205,6 +245,7 @@ mod tests {
     use crate::cpu_arch::CpuArch;
     use crate::libc_version::LibcVersion;
     use std::cell::Cell;
+    use tempfile::TempDir;
 
     fn new_version(short: &str) -> LibcVersion {
         LibcVersion {
@@ -309,6 +350,24 @@ mod tests {
         );
 
         assert_eq!(libs, ["libpthread.so.0", "libnss_dns.so.2"]);
+    }
+
+    #[test]
+    fn libc_family_detects_musl_by_filename() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let libc = tmp.path().join("ld-musl-x86_64.so.1");
+        std::fs::write(&libc, b"not an actual elf").expect("write musl marker");
+
+        assert_eq!(detect_libc_family(&libc), LibcFamily::Musl);
+    }
+
+    #[test]
+    fn libc_family_detects_musl_by_bytes() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let libc = tmp.path().join("libc.so.6");
+        std::fs::write(&libc, b"some MUSL libc marker").expect("write musl marker");
+
+        assert_eq!(detect_libc_family(&libc), LibcFamily::Musl);
     }
 
     #[test]
