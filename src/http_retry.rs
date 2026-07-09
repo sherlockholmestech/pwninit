@@ -266,7 +266,13 @@ pub fn post_bytes(
     policy: RetryPolicy,
     sleeper: &mut dyn Sleeper,
 ) -> Result<(Vec<u8>, RetryTrace)> {
-    request_bytes(Method::POST, url, Some(Cow::Borrowed(body)), policy, sleeper)
+    request_bytes(
+        Method::POST,
+        url,
+        Some(Cow::Borrowed(body)),
+        policy,
+        sleeper,
+    )
 }
 
 /// Fetch `url` and decode the response body as JSON into `T`, retrying
@@ -324,7 +330,6 @@ where
             RetryOutcome::Permanent(Error::PermanentStatus { status })
         }
     })
-    .map(|(value, trace)| (value, trace))
 }
 
 #[cfg(test)]
@@ -457,19 +462,16 @@ mod tests {
     fn retry_succeeds_after_transient_failures() {
         let mut sleeper = RecordingSleeper::default();
         let mut attempts: u32 = 0;
-        let (value, trace): (i32, RetryTrace) = retry_with_policy(
-            test_policy(),
-            &mut sleeper,
-            || {
+        let (value, trace): (i32, RetryTrace) =
+            retry_with_policy(test_policy(), &mut sleeper, || {
                 attempts += 1;
                 if attempts < 3 {
                     RetryOutcome::Transient(transient())
                 } else {
                     RetryOutcome::Success(42)
                 }
-            },
-        )
-        .expect("retry should succeed");
+            })
+            .expect("retry should succeed");
 
         assert_eq!(value, 42);
         assert_eq!(trace.attempts, 3);
@@ -491,10 +493,7 @@ mod tests {
         .expect_err("retry must fail when attempts are exhausted");
 
         assert_eq!(attempts, test_policy().max_attempts);
-        assert_eq!(
-            sleeper.sleeps.len() as u32,
-            test_policy().max_attempts - 1
-        );
+        assert_eq!(sleeper.sleeps.len() as u32, test_policy().max_attempts - 1);
         match err {
             Error::RetryableStatus { status } => {
                 assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR)
@@ -526,12 +525,9 @@ mod tests {
     #[test]
     fn first_attempt_success_does_not_sleep() {
         let mut sleeper = RecordingSleeper::default();
-        let (value, trace): (i32, RetryTrace) = retry_with_policy(
-            test_policy(),
-            &mut sleeper,
-            || RetryOutcome::Success(7),
-        )
-        .expect("first-attempt success");
+        let (value, trace): (i32, RetryTrace) =
+            retry_with_policy(test_policy(), &mut sleeper, || RetryOutcome::Success(7))
+                .expect("first-attempt success");
 
         assert_eq!(value, 7);
         assert_eq!(trace.attempts, 1);

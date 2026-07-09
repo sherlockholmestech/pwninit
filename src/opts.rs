@@ -245,10 +245,13 @@ impl Opts {
                     cmd: Some(Command::Rev(opts)),
                 })
             }
-            Some(Command::FetchLibc(opts)) => Ok(Opts {
-                pwn: self.pwn,
-                cmd: Some(Command::FetchLibc(opts)),
-            }),
+            Some(Command::FetchLibc(opts)) => {
+                let pwn = fold_current_dir(self.pwn, PwnOpts::merge_entry)?;
+                Ok(Opts {
+                    pwn,
+                    cmd: Some(Command::FetchLibc(opts)),
+                })
+            }
             None => {
                 let pwn = fold_current_dir(self.pwn, PwnOpts::merge_entry)?;
                 Ok(Opts { pwn, cmd: None })

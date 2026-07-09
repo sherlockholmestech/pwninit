@@ -56,7 +56,13 @@ struct Entry {
 pub fn search_versions(short_version: &str, arch: &CpuArch) -> Result<Vec<String>> {
     let policy = RetryPolicy::default();
     let mut sleeper = StdSleeper;
-    search_versions_with(short_version, arch, LAUNCHPAD_API_BASE, policy, &mut sleeper)
+    search_versions_with(
+        short_version,
+        arch,
+        LAUNCHPAD_API_BASE,
+        policy,
+        &mut sleeper,
+    )
 }
 
 /// Same as [`search_versions`] but lets callers inject the API base URL,
@@ -488,10 +494,7 @@ mod tests {
     #[test]
     fn retries_after_5xx_then_succeeds() {
         let body = page(vec![entry("2.31-0ubuntu9", "amd64")], None);
-        let server = FakeLaunchpadServer::with_responses(vec![
-            status(503, ""),
-            status(200, &body),
-        ]);
+        let server = FakeLaunchpadServer::with_responses(vec![status(503, ""), status(200, &body)]);
 
         let mut sleeper = RecordingSleeper::default();
         let versions = search_versions_with(
@@ -516,10 +519,7 @@ mod tests {
     #[test]
     fn retries_after_408_then_succeeds() {
         let body = page(vec![entry("2.31-0ubuntu9", "amd64")], None);
-        let server = FakeLaunchpadServer::with_responses(vec![
-            status(408, ""),
-            status(200, &body),
-        ]);
+        let server = FakeLaunchpadServer::with_responses(vec![status(408, ""), status(200, &body)]);
 
         let mut sleeper = RecordingSleeper::default();
         let versions = search_versions_with(
@@ -538,10 +538,7 @@ mod tests {
     #[test]
     fn retries_after_429_then_succeeds() {
         let body = page(vec![entry("2.31-0ubuntu9", "amd64")], None);
-        let server = FakeLaunchpadServer::with_responses(vec![
-            status(429, ""),
-            status(200, &body),
-        ]);
+        let server = FakeLaunchpadServer::with_responses(vec![status(429, ""), status(200, &body)]);
 
         let mut sleeper = RecordingSleeper::default();
         let versions = search_versions_with(
@@ -560,10 +557,7 @@ mod tests {
     #[test]
     fn retries_after_500_then_succeeds() {
         let body = page(vec![entry("2.31-0ubuntu9", "amd64")], None);
-        let server = FakeLaunchpadServer::with_responses(vec![
-            status(500, ""),
-            status(200, &body),
-        ]);
+        let server = FakeLaunchpadServer::with_responses(vec![status(500, ""), status(200, &body)]);
 
         let mut sleeper = RecordingSleeper::default();
         let versions = search_versions_with(
@@ -582,10 +576,7 @@ mod tests {
     #[test]
     fn retries_after_502_then_succeeds() {
         let body = page(vec![entry("2.31-0ubuntu9", "amd64")], None);
-        let server = FakeLaunchpadServer::with_responses(vec![
-            status(502, ""),
-            status(200, &body),
-        ]);
+        let server = FakeLaunchpadServer::with_responses(vec![status(502, ""), status(200, &body)]);
 
         let mut sleeper = RecordingSleeper::default();
         let versions = search_versions_with(
@@ -654,7 +645,8 @@ mod tests {
     fn malformed_json_fails_as_parse_error_without_retry() {
         // The body is not valid JSON; reqwest's JSON decoder returns a
         // permanent parse error which our retry layer must not retry.
-        let server = FakeLaunchpadServer::with_responses(vec![status(200, "<html>not json</html>")]);
+        let server =
+            FakeLaunchpadServer::with_responses(vec![status(200, "<html>not json</html>")]);
 
         let mut sleeper = RecordingSleeper::default();
         let err = search_versions_with(
@@ -697,7 +689,11 @@ mod tests {
         )
         .expect_err("retry exhaustion should fail");
 
-        assert_eq!(sleeper.sleeps.len(), 2, "one backoff between each pair of attempts");
+        assert_eq!(
+            sleeper.sleeps.len(),
+            2,
+            "one backoff between each pair of attempts"
+        );
         match err {
             Error::Request {
                 source: http_retry::Error::RetryableStatus { status },
@@ -715,15 +711,12 @@ mod tests {
         let server = FakeLaunchpadServer::new();
         let next_link = format!("{}/page2", server.base_url);
 
-        let page1_body = page(
-            vec![entry("2.31-0ubuntu9", "amd64")],
-            Some(&next_link),
-        );
+        let page1_body = page(vec![entry("2.31-0ubuntu9", "amd64")], Some(&next_link));
         let page2_body = page(
             vec![
                 entry("2.31-0ubuntu9.16", "amd64"),
                 entry("2.31-0ubuntu9.16", "amd64"), // duplicate
-                entry("2.31-0ubuntu9.16", "i386"), // wrong arch
+                entry("2.31-0ubuntu9.16", "i386"),  // wrong arch
             ],
             None,
         );

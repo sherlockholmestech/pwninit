@@ -1,5 +1,6 @@
 use crate::fetch_libc;
 use crate::maybe_visit_libc;
+use crate::needed_glibc_libraries;
 use crate::opts::{self, Command, Opts};
 use crate::patch_bin;
 use crate::set_bin_exec_pwn;
@@ -39,14 +40,29 @@ pub enum Error {
 
 pub type Result<T = ()> = std::result::Result<T, Error>;
 
-fn run_fetch_libc(fetch_opts: crate::opts::FetchLibcOpts) -> Result {
+fn run_fetch_libc(
+    fetch_opts: crate::opts::FetchLibcOpts,
+    mut pwn_opts: crate::opts::PwnOpts,
+) -> Result {
+    let libc_output = fetch_opts.output.clone();
+    let mut extra_libs = fetch_opts.extra_libs;
+    extra_libs.extend(needed_glibc_libraries(&pwn_opts));
+
     fetch_libc::fetch_libc_interactive(
         &fetch_opts.version,
         fetch_opts.arch,
         &fetch_opts.output,
-        &fetch_opts.extra_libs,
+        &extra_libs,
     )
-    .context(FetchLibcSnafu)
+    .context(FetchLibcSnafu)?;
+
+    if pwn_opts.bin.is_some() {
+        pwn_opts.libc = Some(libc_output);
+        pwn_opts = pwn_opts.detect_ld().context(FindSnafu)?;
+        run_pwn_flow(pwn_opts)?;
+    }
+
+    Ok(())
 }
 
 fn run_rev_flow(rev_opts: crate::opts::RevOpts) -> Result {
@@ -97,7 +113,7 @@ pub fn run(opts: Opts) -> Result {
     println!();
 
     match opts.cmd {
-        Some(Command::FetchLibc(fetch_opts)) => run_fetch_libc(fetch_opts),
+        Some(Command::FetchLibc(fetch_opts)) => run_fetch_libc(fetch_opts, opts.pwn),
         Some(Command::Rev(rev_opts)) => run_rev_flow(rev_opts),
         None => run_pwn_flow(opts.pwn),
     }

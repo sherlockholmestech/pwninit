@@ -195,6 +195,7 @@ pub fn fetch_libc_interactive(
 /// single-match flow does not read from stdin, and verify that the
 /// multi-match flow honors the supplied selection and retries only the
 /// failed HTTP operation.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_libc_interactive_with(
     short_version: &str,
     arch: CpuArch,
@@ -208,8 +209,9 @@ pub(crate) fn fetch_libc_interactive_with(
     input: &mut dyn io::BufRead,
     output: &mut dyn io::Write,
 ) -> Result {
-    let versions = libc_search::search_versions_with(short_version, &arch, api_base, policy, sleeper)
-        .context(SearchSnafu)?;
+    let versions =
+        libc_search::search_versions_with(short_version, &arch, api_base, policy, sleeper)
+            .context(SearchSnafu)?;
 
     if versions.is_empty() {
         return Err(Error::NoVersionsFound);
@@ -221,7 +223,7 @@ pub(crate) fn fetch_libc_interactive_with(
     } else {
         writeln!(output).ok();
         for (i, v) in versions.iter().enumerate() {
-            writeln!(output, "  {}  {}", format!("[{}]", i + 1), v).ok();
+            writeln!(output, "  [{}]  {}", i + 1, v).ok();
         }
         writeln!(output).ok();
 
@@ -747,9 +749,7 @@ mod tests {
             ("libdl.so.2", b"libdl bytes"),
         ]);
         let server = ScriptedServer::with(vec![
-            ScriptedResponse::Body(
-                launchpad_page(&[("2.34-0ubuntu3", "amd64")]).into_bytes(),
-            ),
+            ScriptedResponse::Body(launchpad_page(&[("2.34-0ubuntu3", "amd64")]).into_bytes()),
             ScriptedResponse::Body(deb.clone()),
             ScriptedResponse::Body(deb.clone()),
             ScriptedResponse::Body(deb.clone()),
@@ -786,13 +786,9 @@ mod tests {
         .expect("single-match flow should succeed");
 
         // All expected output files exist.
+        assert_eq!(std::fs::read(&libc_out).expect("read libc"), b"libc bytes");
         assert_eq!(
-            std::fs::read(&libc_out).expect("read libc"),
-            b"libc bytes"
-        );
-        assert_eq!(
-            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2"))
-                .expect("read linker"),
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2")).expect("read linker"),
             b"linker bytes"
         );
         assert_eq!(
@@ -840,9 +836,7 @@ mod tests {
             ("libm.so.6", b"libm bytes"),
         ]);
         let server = ScriptedServer::with(vec![
-            ScriptedResponse::Body(
-                launchpad_page(&[("2.34-0ubuntu3", "amd64")]).into_bytes(),
-            ),
+            ScriptedResponse::Body(launchpad_page(&[("2.34-0ubuntu3", "amd64")]).into_bytes()),
             // libc deb: transient then success
             ScriptedResponse::status(503, b""),
             ScriptedResponse::Body(deb.clone()),
@@ -881,13 +875,9 @@ mod tests {
         assert_eq!(sleeper.sleeps.len(), 3, "expected one backoff per step");
 
         // All output files are written.
+        assert_eq!(std::fs::read(&libc_out).expect("read libc"), b"libc bytes");
         assert_eq!(
-            std::fs::read(&libc_out).expect("read libc"),
-            b"libc bytes"
-        );
-        assert_eq!(
-            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2"))
-                .expect("read linker"),
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2")).expect("read linker"),
             b"linker bytes"
         );
         assert_eq!(
@@ -924,11 +914,8 @@ mod tests {
         // never be requested because the user did not select it.
         let server = ScriptedServer::with(vec![
             ScriptedResponse::Body(
-                launchpad_page(&[
-                    ("2.34-0ubuntu3", "amd64"),
-                    ("2.34-0ubuntu9", "amd64"),
-                ])
-                .into_bytes(),
+                launchpad_page(&[("2.34-0ubuntu3", "amd64"), ("2.34-0ubuntu9", "amd64")])
+                    .into_bytes(),
             ),
             ScriptedResponse::Body(deb_234_9.clone()),
             ScriptedResponse::Body(deb_234_9.clone()),
@@ -969,8 +956,7 @@ mod tests {
             b"libc 2.34-9 bytes"
         );
         assert_eq!(
-            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2"))
-                .expect("read linker"),
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2")).expect("read linker"),
             b"linker 2.34-9 bytes"
         );
         assert_eq!(
@@ -1007,11 +993,8 @@ mod tests {
         ]);
         let server = ScriptedServer::with(vec![
             ScriptedResponse::Body(
-                launchpad_page(&[
-                    ("2.34-0ubuntu3", "amd64"),
-                    ("2.34-0ubuntu9", "amd64"),
-                ])
-                .into_bytes(),
+                launchpad_page(&[("2.34-0ubuntu3", "amd64"), ("2.34-0ubuntu9", "amd64")])
+                    .into_bytes(),
             ),
             ScriptedResponse::Body(deb.clone()),
             ScriptedResponse::Body(deb),
@@ -1065,11 +1048,8 @@ mod tests {
         // 4) linker deb succeeds
         let server = ScriptedServer::with(vec![
             ScriptedResponse::Body(
-                launchpad_page(&[
-                    ("2.34-0ubuntu3", "amd64"),
-                    ("2.34-0ubuntu9", "amd64"),
-                ])
-                .into_bytes(),
+                launchpad_page(&[("2.34-0ubuntu3", "amd64"), ("2.34-0ubuntu9", "amd64")])
+                    .into_bytes(),
             ),
             ScriptedResponse::status(503, b""),
             ScriptedResponse::Body(deb.clone()),
@@ -1112,12 +1092,8 @@ mod tests {
             output_str
         );
         // The libc file is the bytes from the second attempt.
-        assert_eq!(
-            std::fs::read(&libc_out).expect("read libc"),
-            b"libc bytes"
-        );
+        assert_eq!(std::fs::read(&libc_out).expect("read libc"), b"libc bytes");
         // Exactly one backoff: the retry on the libc download.
         assert_eq!(sleeper.sleeps.len(), 1, "only one retry expected");
     }
 }
-

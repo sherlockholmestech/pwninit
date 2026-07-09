@@ -39,6 +39,7 @@ use colored::Color;
 use colored::Colorize;
 use ex::io;
 use is_executable::IsExecutable;
+use snafu::ResultExt;
 
 /// Detect if `path` is the provided pwn binary
 pub fn is_bin(path: &Path) -> elf::detect::Result<bool> {
@@ -65,22 +66,76 @@ pub fn is_libc(path: &Path) -> elf::detect::Result<bool> {
 
 /// Detect if `path` is the provided linker
 pub fn is_ld(path: &Path) -> elf::detect::Result<bool> {
-    Ok(is_elf(path)? && path_name_starts_with(path, &["ld-"]))
+    Ok(is_elf(path)? && path_name_starts_with(path, &["ld-", "ld-linux"]))
 }
 
 /// Same as `fetch_ld()`, but doesn't do anything if an existing linker is
 /// detected
-pub(crate) fn maybe_fetch_ld<F>(
-    opts: &PwnOpts,
-    ver: &LibcVersion,
-    fetch: F,
-) -> fetch_ld::Result
+pub(crate) fn maybe_fetch_ld<F>(opts: &PwnOpts, ver: &LibcVersion, fetch: F) -> fetch_ld::Result
 where
     F: FnOnce(&LibcVersion) -> fetch_ld::Result,
 {
     match opts.ld {
         Some(_) => Ok(()),
         None => fetch(ver),
+    }
+}
+
+fn glibc_package_soname(name: &str) -> bool {
+    matches!(
+        name,
+        "libm.so.6"
+            | "libpthread.so.0"
+            | "libdl.so.2"
+            | "librt.so.1"
+            | "libutil.so.1"
+            | "libresolv.so.2"
+            | "libanl.so.1"
+            | "libBrokenLocale.so.1"
+            | "libnsl.so.1"
+            | "libcrypt.so.1"
+            | "libthread_db.so.1"
+            | "libmemusage.so"
+            | "libpcprofile.so"
+    ) || (name.starts_with("libnss_") && name.ends_with(".so.2"))
+}
+
+fn missing_glibc_package_libraries(libs: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut needed = Vec::new();
+    for lib in libs {
+        if glibc_package_soname(&lib) && !Path::new(&lib).exists() && !needed.contains(&lib) {
+            needed.push(lib);
+        }
+    }
+    needed
+}
+
+fn needed_libraries(bin: &Path) -> elf::parse::Result<Vec<String>> {
+    let bytes = ex::fs::read(bin).context(elf::parse::ReadSnafu {
+        path: bin.to_path_buf(),
+    })?;
+    let elf = elf::parse(bin, &bytes)?;
+    Ok(elf.libraries.iter().map(|name| name.to_string()).collect())
+}
+
+pub(crate) fn needed_glibc_libraries(opts: &PwnOpts) -> Vec<String> {
+    let Some(bin) = &opts.bin else {
+        return Vec::new();
+    };
+
+    match needed_libraries(bin) {
+        Ok(libs) => missing_glibc_package_libraries(libs),
+        Err(err) => {
+            err.warn("failed detecting binary library dependencies");
+            Vec::new()
+        }
+    }
+}
+
+fn maybe_fetch_needed_libs(opts: &PwnOpts, ver: &LibcVersion) {
+    for lib in needed_glibc_libraries(opts) {
+        fetch_libc::fetch_libc_lib(ver, &lib)
+            .warn(&format!("failed fetching required libc companion {}", lib));
     }
 }
 
@@ -96,6 +151,7 @@ fn visit_libc(opts: &PwnOpts, libc: &Path) {
         }
     };
     maybe_fetch_ld(opts, &ver, fetch_ld).warn("failed fetching ld");
+    maybe_fetch_needed_libs(opts, &ver);
     unstrip_libc(libc, &ver).warn("failed unstripping libc");
 }
 
@@ -212,7 +268,10 @@ mod tests {
             Ok(())
         });
         assert!(result.is_ok());
-        assert!(called.get(), "fetch closure must be called when ld is missing");
+        assert!(
+            called.get(),
+            "fetch closure must be called when ld is missing"
+        );
     }
 
     #[test]
@@ -236,6 +295,23 @@ mod tests {
     }
 
     #[test]
+    fn needed_glibc_libraries_filters_to_libc_package_members() {
+        let libs = missing_glibc_package_libraries(
+            [
+                "libpthread.so.0",
+                "libstdc++.so.6",
+                "libnss_dns.so.2",
+                "libpthread.so.0",
+                "libc.so.6",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+
+        assert_eq!(libs, ["libpthread.so.0", "libnss_dns.so.2"]);
+    }
+
+    #[test]
     fn visit_libc_warns_and_continues_on_linker_fetch_failure() {
         // The default pwn flow calls `visit_libc` (via `maybe_visit_libc`)
         // and relies on `.warn()` to convert a linker fetch error into a
@@ -252,4 +328,3 @@ mod tests {
         let _ = bogus; // silence unused warning
     }
 }
-
