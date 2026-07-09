@@ -967,11 +967,13 @@ mod tests {
             ("libm.so.6", b"debian libm bytes"),
         ]);
         let packages = debian_packages_gz(&[(
-            "2.36-9+deb12u13",
-            "pool/main/g/glibc/libc6_2.36-9+deb12u13_amd64.deb",
+            "2.36-9+deb12u14",
+            "pool/main/g/glibc/libc6_2.36-9+deb12u14_amd64.deb",
         )]);
+        let pool_index = b"[ ] libc6_2.36-9+deb12u14_amd64.deb".to_vec();
         let server = ScriptedServer::with(vec![
             ScriptedResponse::Body(packages),
+            ScriptedResponse::Body(pool_index),
             ScriptedResponse::Body(deb.clone()),
             ScriptedResponse::Body(deb.clone()),
             ScriptedResponse::Body(deb),
