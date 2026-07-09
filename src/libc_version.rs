@@ -104,9 +104,10 @@ impl LibcVersion {
 
     /// Extract the long version string from the bytes of a libc
     fn version_string_from_bytes(libc: &[u8]) -> Result<String> {
-        let split: [&[u8]; 2] = [
+        let split: [&[u8]; 3] = [
             b"GNU C Library (Ubuntu GLIBC ",
             b"GNU C Library (Ubuntu EGLIBC ",
+            b"GNU C Library (Debian GLIBC ",
         ];
         let pos = split
             .iter()
@@ -123,5 +124,19 @@ impl LibcVersion {
         let ver_str = &ver_str[..pos];
         let ver_str = std::str::from_utf8(ver_str).context(Utf8Snafu)?.to_string();
         Ok(ver_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_string_detects_debian_glibc() {
+        let bytes = b"GNU C Library (Debian GLIBC 2.36-9+deb12u13) stable release";
+
+        let version = LibcVersion::version_string_from_bytes(bytes).expect("Debian version");
+
+        assert_eq!(version, "2.36-9+deb12u13");
     }
 }

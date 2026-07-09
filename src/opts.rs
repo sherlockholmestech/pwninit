@@ -29,6 +29,7 @@ pub enum PatchMode {
 pub enum FetchLibcSource {
     Launchpad,
     Docker,
+    Debian,
 }
 
 impl FromStr for FetchLibcSource {
@@ -38,8 +39,9 @@ impl FromStr for FetchLibcSource {
         match source {
             "launchpad" => Ok(Self::Launchpad),
             "docker" => Ok(Self::Docker),
+            "debian" => Ok(Self::Debian),
             _ => Err(format!(
-                "unknown fetch source: {}, expected launchpad or docker",
+                "unknown fetch source: {}, expected launchpad, docker, or debian",
                 source
             )),
         }
@@ -215,6 +217,10 @@ pub struct FetchLibcOpts {
     /// Docker image distro release/tag, used with --distro, e.g. 22.04
     #[arg(long)]
     pub release: Option<String>,
+
+    /// Debian repository base URL, used with --source debian
+    #[arg(long, default_value = "https://deb.debian.org/debian")]
+    pub repo_url: String,
 }
 
 impl Default for PwnOpts {
@@ -477,6 +483,23 @@ mod tests {
         assert_eq!(fetch_opts.source, FetchLibcSource::Docker);
         assert_eq!(fetch_opts.distro.as_deref(), Some("debian"));
         assert_eq!(fetch_opts.release.as_deref(), Some("bookworm"));
+    }
+
+    #[test]
+    fn fetch_libc_debian_source_parses_release_and_repo_url() {
+        let fetch_opts = parse_fetch_libc(&[
+            "2.36",
+            "--source",
+            "debian",
+            "--release",
+            "bookworm",
+            "--repo-url",
+            "https://deb.debian.org/debian",
+        ]);
+        assert_eq!(fetch_opts.source, FetchLibcSource::Debian);
+        assert_eq!(fetch_opts.version.as_deref(), Some("2.36"));
+        assert_eq!(fetch_opts.release.as_deref(), Some("bookworm"));
+        assert_eq!(fetch_opts.repo_url, "https://deb.debian.org/debian");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::debian_libc;
 use crate::elf;
 use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
 use crate::libc_deb;
@@ -8,8 +9,11 @@ use std::io::stderr;
 use std::io::stdout;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::ExitStatus;
+use std::sync::mpsc;
+use std::thread;
 
 use colored::Colorize;
 use ex::fs::File;
@@ -25,6 +29,9 @@ pub enum Error {
 
     #[snafu(display("libc deb error: {}", source))]
     Deb { source: libc_deb::Error },
+
+    #[snafu(display("failed fetching debug symbols from all sources: {}", errors))]
+    DebugSourcesFailed { errors: String },
 
     #[snafu(display("failed creating temporary directory"))]
     TmpDir { source: std::io::Error },
@@ -52,31 +59,43 @@ pub(crate) fn debug_deb_file_name(ver: &LibcVersion) -> String {
     format!("libc6-dbg_{}.deb", ver)
 }
 
+#[derive(Clone, Debug)]
+struct DebugSymbolSource {
+    name: String,
+    url: String,
+}
+
 /// Download debug symbols and apply them to a libc
 fn do_unstrip_libc(libc: &Path, ver: &LibcVersion) -> Result {
-    let mut sleeper = StdSleeper;
-    do_unstrip_libc_with(
-        libc,
-        ver,
-        libc_deb::PKG_URL,
-        RetryPolicy::default(),
-        &mut sleeper,
-    )
+    do_unstrip_libc_with_sources(libc, ver, debug_symbol_sources(ver), RetryPolicy::default())
 }
 
 /// Same as [`do_unstrip_libc`] but lets callers inject the base URL, retry
 /// policy, and sleeper. Used by tests to drive a local fake server with
 /// deterministic responses.
+#[allow(dead_code)]
 pub(crate) fn do_unstrip_libc_with(
     libc: &Path,
     ver: &LibcVersion,
     base_url: &str,
     policy: RetryPolicy,
-    sleeper: &mut dyn Sleeper,
+    _sleeper: &mut dyn Sleeper,
+) -> Result {
+    let deb_file_name = debug_deb_file_name(ver);
+    let source = DebugSymbolSource {
+        name: "test".to_string(),
+        url: format!("{}/{}", base_url.trim_end_matches('/'), deb_file_name),
+    };
+    do_unstrip_libc_with_sources(libc, ver, vec![source], policy)
+}
+
+fn do_unstrip_libc_with_sources(
+    libc: &Path,
+    ver: &LibcVersion,
+    sources: Vec<DebugSymbolSource>,
+    policy: RetryPolicy,
 ) -> Result {
     println!("{}", "unstripping libc".yellow().bold());
-
-    let deb_file_name = debug_deb_file_name(ver);
 
     let tmp_dir = TempDir::new().context(TmpDirSnafu)?;
 
@@ -89,15 +108,7 @@ pub(crate) fn do_unstrip_libc_with(
     };
     let names = [versioned_name.as_str(), build_id_name.as_str()];
 
-    libc_deb::write_ubuntu_pkg_file_with(
-        &deb_file_name,
-        names.as_slice(),
-        &sym_path,
-        base_url,
-        policy,
-        sleeper,
-    )
-    .context(DebSnafu)?;
+    fetch_debug_symbols_with_sources(names.as_slice(), &sym_path, tmp_dir.path(), sources, policy)?;
 
     let out = Command::new("eu-unstrip")
         .arg(libc)
@@ -114,6 +125,111 @@ pub(crate) fn do_unstrip_libc_with(
     let mut libc_file = File::create(libc).context(LibcOpenSnafu)?;
     copy(&mut sym_file, &mut libc_file).context(LibcWriteSnafu)?;
 
+    Ok(())
+}
+
+fn debug_symbol_sources(ver: &LibcVersion) -> Vec<DebugSymbolSource> {
+    let deb_file_name = debug_deb_file_name(ver);
+    let mut sources = vec![DebugSymbolSource {
+        name: "launchpad".to_string(),
+        url: format!("{}/{}", libc_deb::PKG_URL, deb_file_name),
+    }];
+
+    for release in ["stable", "testing", "unstable"] {
+        let mut sleeper = StdSleeper;
+        match debian_libc::search_exact_package(
+            "libc6-dbg",
+            &ver.string,
+            ver.arch,
+            release,
+            debian_libc::DEBIAN_REPO_URL,
+            RetryPolicy::default(),
+            &mut sleeper,
+        ) {
+            Ok(Some(package)) => sources.push(DebugSymbolSource {
+                name: format!("debian-{}", release),
+                url: package.deb_url,
+            }),
+            Ok(None) => {}
+            Err(err) => eprintln!(
+                "warning: failed searching Debian {} for libc6-dbg: {}",
+                release, err
+            ),
+        }
+    }
+
+    let debian_pool_url = format!(
+        "{}/pool/main/g/glibc/{}",
+        debian_libc::DEBIAN_REPO_URL,
+        deb_file_name
+    );
+    if !sources.iter().any(|source| source.url == debian_pool_url) {
+        sources.push(DebugSymbolSource {
+            name: "debian-pool".to_string(),
+            url: debian_pool_url,
+        });
+    }
+
+    sources
+}
+
+fn fetch_debug_symbols_with_sources(
+    file_names: &[&str],
+    sym_path: &Path,
+    tmp_dir: &Path,
+    sources: Vec<DebugSymbolSource>,
+    policy: RetryPolicy,
+) -> Result {
+    let (tx, rx) = mpsc::channel();
+    let mut handles = Vec::new();
+
+    for (idx, source) in sources.into_iter().enumerate() {
+        let tx = tx.clone();
+        let file_names: Vec<String> = file_names.iter().map(|name| (*name).to_string()).collect();
+        let out_path = tmp_dir.join(format!("libc-syms-{}", idx));
+        let thread_policy = policy;
+        handles.push(thread::spawn(move || {
+            let mut sleeper = StdSleeper;
+            let names: Vec<&str> = file_names.iter().map(String::as_str).collect();
+            let result = libc_deb::write_deb_url_file_with(
+                &source.url,
+                &names,
+                &out_path,
+                thread_policy,
+                &mut sleeper,
+            )
+            .map(|()| out_path)
+            .map_err(|err| err.to_string());
+            let _ = tx.send((source.name, result));
+        }));
+    }
+    drop(tx);
+
+    let mut winner: Option<(String, PathBuf)> = None;
+    let mut errors = Vec::new();
+    for (name, result) in rx {
+        match result {
+            Ok(path) if winner.is_none() => winner = Some((name, path)),
+            Ok(_) => {}
+            Err(err) => errors.push(format!("{}: {}", name, err)),
+        }
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let Some((name, path)) = winner else {
+        return Err(Error::DebugSourcesFailed {
+            errors: errors.join("; "),
+        });
+    };
+
+    std::fs::copy(&path, sym_path).context(LibcWriteSnafu)?;
+    println!(
+        "{}",
+        format!("using debug symbols from {}", name).green().bold()
+    );
     Ok(())
 }
 
@@ -361,5 +477,47 @@ mod tests {
             );
         }
         assert_eq!(sleeper.sleeps.len(), 1, "expected one backoff");
+    }
+
+    #[test]
+    fn debug_symbol_fetch_races_launchpad_and_debian_testing_sources() {
+        let deb = make_tiny_deb_gz("libc-2.36.so", b"debian testing debug bytes");
+        let launchpad = ScriptedServer::with(vec![ScriptedResponse::status(404, b"missing")]);
+        let debian_testing = ScriptedServer::with(vec![ScriptedResponse::Body(deb)]);
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let sym_path = tmp.path().join("libc-syms");
+        let names = ["libc-2.36.so"];
+        let sources = vec![
+            DebugSymbolSource {
+                name: "launchpad".to_string(),
+                url: format!("{}/libc6-dbg_2.36-9_amd64.deb", launchpad.base_url),
+            },
+            DebugSymbolSource {
+                name: "debian-testing".to_string(),
+                url: format!(
+                    "{}/pool/main/g/glibc/libc6-dbg_2.36-9_amd64.deb",
+                    debian_testing.base_url
+                ),
+            },
+        ];
+
+        fetch_debug_symbols_with_sources(&names, &sym_path, tmp.path(), sources, fast_policy())
+            .expect("Debian testing source should satisfy debug symbol fetch");
+
+        assert_eq!(
+            std::fs::read(&sym_path).expect("read symbols"),
+            b"debian testing debug bytes"
+        );
+        assert_eq!(
+            launchpad.recorded().len(),
+            1,
+            "Launchpad source should be attempted"
+        );
+        assert_eq!(
+            debian_testing.recorded().len(),
+            1,
+            "Debian testing source should be attempted"
+        );
     }
 }

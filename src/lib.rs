@@ -1,6 +1,7 @@
 //! Utility functions that provide the bulk of `pwninit` functionality
 
 mod cpu_arch;
+mod debian_libc;
 mod docker_libc;
 mod elf;
 mod fetch_ld;

@@ -17,7 +17,7 @@ pub enum Error {
 
 pub type Result<T = ()> = std::result::Result<T, Error>;
 
-fn ld_name_in_deb(ver: &LibcVersion) -> String {
+pub(crate) fn ld_name_in_deb(ver: &LibcVersion) -> String {
     if ver.is_pre_234() {
         format!("ld-{}.so", ver.string_short)
     } else {

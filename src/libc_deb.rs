@@ -119,8 +119,20 @@ pub(crate) fn write_ubuntu_pkg_file_with<P: AsRef<Path>>(
     policy: RetryPolicy,
     sleeper: &mut dyn Sleeper,
 ) -> Result<()> {
-    let out_path = out_path.as_ref();
     let url = format!("{}/{}", base_url, deb_file_name);
+    write_deb_url_file_with(&url, file_names, out_path, policy, sleeper)
+}
+
+/// Download a deb package from a full URL, find a file inside it, and extract
+/// the file.
+pub(crate) fn write_deb_url_file_with<P: AsRef<Path>>(
+    url: &str,
+    file_names: &[&str],
+    out_path: P,
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+) -> Result<()> {
+    let out_path = out_path.as_ref();
     println!("{}", url.green().bold());
 
     let deb_bytes = match http_retry::get_bytes(&url, policy, sleeper) {

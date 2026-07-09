@@ -76,6 +76,23 @@ fn run_fetch_libc(
             )
             .context(FetchLibcSnafu)?;
         }
+        FetchLibcSource::Debian => {
+            let Some(version) = fetch_opts.version.as_deref() else {
+                return Err(fetch_libc::Error::MissingDebianVersion).context(FetchLibcSnafu);
+            };
+            let Some(release) = fetch_opts.release.as_deref() else {
+                return Err(fetch_libc::Error::MissingDebianRelease).context(FetchLibcSnafu);
+            };
+            fetch_libc::fetch_libc_from_debian(
+                version,
+                fetch_opts.arch,
+                release,
+                &fetch_opts.repo_url,
+                &fetch_opts.output,
+                &extra_libs,
+            )
+            .context(FetchLibcSnafu)?;
+        }
     }
 
     if pwn_opts.bin.is_some() {

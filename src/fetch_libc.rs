@@ -1,4 +1,5 @@
 use crate::cpu_arch::CpuArch;
+use crate::debian_libc;
 use crate::docker_libc;
 use crate::fetch_ld;
 use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
@@ -22,6 +23,9 @@ pub enum Error {
     #[snafu(display("libc search error: {}", source))]
     Search { source: libc_search::Error },
 
+    #[snafu(display("Debian libc search error: {}", source))]
+    Debian { source: debian_libc::Error },
+
     #[snafu(display("libc version error: {}", source))]
     Version { source: crate::libc_version::Error },
 
@@ -39,6 +43,12 @@ pub enum Error {
 
     #[snafu(display("fetch-libc launchpad source requires a glibc version argument"))]
     MissingLaunchpadVersion,
+
+    #[snafu(display("fetch-libc debian source requires a glibc version argument"))]
+    MissingDebianVersion,
+
+    #[snafu(display("fetch-libc debian source requires --release"))]
+    MissingDebianRelease,
 
     #[snafu(display(
         "fetch-libc docker source requires either --image or both --distro and --release"
@@ -95,6 +105,20 @@ pub(crate) fn fetch_libc_package_file_with(
         sleeper,
     )
     .context(DebSnafu)
+}
+
+fn fetch_libc_package_file_from_url_with(
+    ver: &LibcVersion,
+    soname: &str,
+    out_path: &Path,
+    deb_url: &str,
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+) -> Result {
+    let versioned_name = versioned_lib_name(soname, ver);
+    let file_names = package_file_candidates(ver, soname, &versioned_name);
+    libc_deb::write_deb_url_file_with(deb_url, &file_names, out_path, policy, sleeper)
+        .context(DebSnafu)
 }
 
 fn package_file_candidates<'a>(
@@ -196,6 +220,130 @@ pub fn fetch_libc_from_docker(
 ) -> Result {
     let extra_libs = normalize_extra_libs(extra_libs)?;
     docker_libc::extract_libc_files(image, arch, out_path, &extra_libs).context(DockerSnafu)
+}
+
+pub fn fetch_libc_from_debian(
+    short_version: &str,
+    arch: CpuArch,
+    release: &str,
+    repo_url: &str,
+    out_path: &Path,
+    extra_libs: &[String],
+) -> Result {
+    let mut sleeper = StdSleeper;
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    fetch_libc_from_debian_with(
+        short_version,
+        arch,
+        release,
+        repo_url,
+        out_path,
+        Path::new("."),
+        extra_libs,
+        RetryPolicy::default(),
+        &mut sleeper,
+        &mut input,
+        &mut io::stdout(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_libc_from_debian_with(
+    short_version: &str,
+    arch: CpuArch,
+    release: &str,
+    repo_url: &str,
+    out_path: &Path,
+    out_dir: &Path,
+    extra_libs: &[String],
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+    input: &mut dyn io::BufRead,
+    output: &mut dyn io::Write,
+) -> Result {
+    writeln!(
+        output,
+        "{}",
+        format!(
+            "searching Debian {} for libc6 {}* ({})",
+            release, short_version, arch
+        )
+        .cyan()
+        .bold()
+    )
+    .ok();
+    let packages =
+        debian_libc::search_versions_with(short_version, arch, release, repo_url, policy, sleeper)
+            .context(DebianSnafu)?;
+
+    if packages.is_empty() {
+        return Err(Error::NoVersionsFound);
+    }
+
+    let choice = if packages.len() == 1 {
+        writeln!(output, "  {}", packages[0].version).ok();
+        0
+    } else {
+        writeln!(output).ok();
+        for (i, package) in packages.iter().enumerate() {
+            writeln!(output, "  [{}]  {}", i + 1, package.version).ok();
+        }
+        writeln!(output).ok();
+
+        loop {
+            write!(output, "select version: ").ok();
+            output.flush().ok();
+
+            let mut line = String::new();
+            input.read_line(&mut line).context(StdinSnafu)?;
+
+            let trimmed = line.trim();
+            if let Ok(n) = trimmed.parse::<usize>() {
+                if n >= 1 && n <= packages.len() {
+                    break n - 1;
+                }
+            }
+            writeln!(
+                output,
+                "please enter a number between 1 and {}",
+                packages.len()
+            )
+            .ok();
+        }
+    };
+
+    let package = &packages[choice];
+    let ver = LibcVersion::from_parts(package.version.clone(), arch).context(VersionSnafu)?;
+    let extra_libs = normalize_extra_libs(extra_libs)?;
+
+    fetch_libc_package_file_from_url_with(
+        &ver,
+        LIBC_SONAME,
+        out_path,
+        &package.deb_url,
+        policy,
+        sleeper,
+    )?;
+
+    let linker_out = out_dir.join(fetch_ld::canonical_ld_name(&ver.arch));
+    let ld_name = fetch_ld::ld_name_in_deb(&ver);
+    libc_deb::write_deb_url_file_with(&package.deb_url, &[&ld_name], &linker_out, policy, sleeper)
+        .context(DebSnafu)?;
+
+    for extra_lib in &extra_libs {
+        let lib_out = out_dir.join(extra_lib);
+        fetch_libc_package_file_from_url_with(
+            &ver,
+            extra_lib,
+            &lib_out,
+            &package.deb_url,
+            policy,
+            sleeper,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Search for available libc6 versions matching `short_version`, prompt the
@@ -794,6 +942,80 @@ mod tests {
                 .expect("append data.tar.gz");
         }
         deb
+    }
+
+    fn debian_packages_gz(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut packages = String::new();
+        for (version, filename) in entries {
+            packages.push_str(&format!(
+                "Package: libc6\nVersion: {}\nFilename: {}\n\n",
+                version, filename
+            ));
+        }
+
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(packages.as_bytes())
+            .expect("write Packages.gz");
+        gz.finish().expect("finish Packages.gz")
+    }
+
+    #[test]
+    fn fetch_libc_debian_single_match_writes_all_outputs_without_stdin() {
+        let deb = make_tiny_deb_gz_multi(&[
+            ("libc.so.6", b"debian libc bytes"),
+            ("ld-linux-x86-64.so.2", b"debian linker bytes"),
+            ("libm.so.6", b"debian libm bytes"),
+        ]);
+        let packages = debian_packages_gz(&[(
+            "2.36-9+deb12u13",
+            "pool/main/g/glibc/libc6_2.36-9+deb12u13_amd64.deb",
+        )]);
+        let server = ScriptedServer::with(vec![
+            ScriptedResponse::Body(packages),
+            ScriptedResponse::Body(deb.clone()),
+            ScriptedResponse::Body(deb.clone()),
+            ScriptedResponse::Body(deb),
+        ]);
+
+        let mut sleeper = RecordingSleeper::default();
+        let mut input = std::io::Cursor::new(b"" as &[u8]);
+        let mut output = Vec::<u8>::new();
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let libc_out = tmp.path().join("libc.so.6");
+        let extra_libs = vec!["libm.so.6".to_string()];
+
+        fetch_libc_from_debian_with(
+            "2.36",
+            CpuArch::Amd64,
+            "bookworm",
+            &server.base_url,
+            &libc_out,
+            tmp.path(),
+            &extra_libs,
+            fast_policy(),
+            &mut sleeper,
+            &mut input,
+            &mut output,
+        )
+        .expect("Debian fetch should succeed");
+
+        assert_eq!(
+            std::fs::read(&libc_out).expect("read libc"),
+            b"debian libc bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2")).expect("read linker"),
+            b"debian linker bytes"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("libm.so.6")).expect("read libm"),
+            b"debian libm bytes"
+        );
+        assert_eq!(
+            input.position(),
+            0,
+            "single-match Debian flow must not read from stdin"
+        );
     }
 
     /// VAL-CROSS-001: the single-match `fetch-libc` flow runs all four
