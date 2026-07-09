@@ -42,9 +42,8 @@ pub type Result<T = ()> = std::result::Result<T, Error>;
 
 fn run_fetch_libc(
     fetch_opts: crate::opts::FetchLibcOpts,
-    mut pwn_opts: crate::opts::PwnOpts,
+    pwn_opts: crate::opts::PwnOpts,
 ) -> Result {
-    let libc_output = fetch_opts.output.clone();
     let mut extra_libs = fetch_opts.extra_libs;
     extra_libs.extend(needed_glibc_libraries(&pwn_opts));
 
@@ -93,12 +92,6 @@ fn run_fetch_libc(
             )
             .context(FetchLibcSnafu)?;
         }
-    }
-
-    if pwn_opts.bin.is_some() {
-        pwn_opts.libc = Some(libc_output);
-        pwn_opts = pwn_opts.detect_ld().context(FindSnafu)?;
-        run_pwn_flow(pwn_opts)?;
     }
 
     Ok(())

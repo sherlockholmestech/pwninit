@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "pwninit"
-version = "3.7.0"
+version = "3.9.0"
 dependencies = [
  "ar",
  "clap",
