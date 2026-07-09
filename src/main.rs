@@ -2,13 +2,13 @@
 
 use pwninit::opts::Opts;
 
+use clap::Parser;
 use colored::Colorize;
-use structopt::StructOpt;
 
 /// Parse command line options and set up specified directory for pwning
 fn try_main() -> pwninit::Result {
     // Parse arguments and run
-    let opts = Opts::from_args();
+    let opts = Opts::parse();
     pwninit::run(opts)?;
     Ok(())
 }

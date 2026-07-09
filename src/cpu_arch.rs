@@ -7,13 +7,14 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use clap::ValueEnum;
 use goblin::elf::header::EM_386;
 use goblin::elf::header::EM_X86_64;
 use snafu::ResultExt;
 use snafu::Snafu;
 
 /// The CPU architectures supported by `pwninit`
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CpuArch {
     I386,
     Amd64,

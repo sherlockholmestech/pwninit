@@ -10,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Color;
 use colored::Colorize;
 use derive_setters::Setters;
@@ -17,7 +18,6 @@ use ex::fs;
 use ex::io;
 use snafu::ResultExt;
 use snafu::Snafu;
-use structopt::StructOpt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchMode {
@@ -25,7 +25,7 @@ pub enum PatchMode {
     Manual,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FetchLibcSource {
     Launchpad,
     Docker,
@@ -81,19 +81,19 @@ fn detect_path_if(
 }
 
 /// automate starting binary exploit and reverse engineering challenges
-#[derive(StructOpt, Clone)]
+#[derive(Parser, Clone)]
 pub struct Opts {
     /// Pwn challenge options (default when no subcommand is provided)
-    #[structopt(flatten)]
+    #[command(flatten)]
     pub pwn: PwnOpts,
 
     /// Challenge type to initialize
-    #[structopt(subcommand)]
+    #[command(subcommand)]
     pub cmd: Option<Command>,
 }
 
 /// Challenge type to initialize (default: pwn)
-#[derive(StructOpt, Clone)]
+#[derive(Subcommand, Clone)]
 pub enum Command {
     /// Reverse engineering challenge
     Rev(RevOpts),
@@ -103,121 +103,117 @@ pub enum Command {
 }
 
 /// Options for pwn challenge initialization
-#[derive(StructOpt, Setters, Clone)]
+#[derive(Args, Setters, Clone)]
 #[setters(generate = "false")]
 #[setters(prefix = "with_")]
 pub struct PwnOpts {
     /// Path to the challenge binary (auto-detected if not set)
-    #[structopt(long)]
+    #[arg(long)]
     #[setters(generate)]
     pub bin: Option<PathBuf>,
 
     /// Path to the challenge libc (auto-detected if not set)
-    #[structopt(long)]
+    #[arg(long)]
     #[setters(generate)]
     pub libc: Option<PathBuf>,
 
     /// Path to the ELF interpreter / dynamic linker (auto-detected if not set)
-    #[structopt(long)]
+    #[arg(long)]
     #[setters(generate)]
     pub ld: Option<PathBuf>,
 
     /// Path to a custom pwntools solve script template (uses built-in template if not set)
-    #[structopt(long)]
+    #[arg(long)]
     pub template_path: Option<PathBuf>,
 
     /// Variable name for the binary in the solve script template
-    #[structopt(long, default_value = "exe")]
+    #[arg(long, default_value = "exe")]
     pub template_bin_name: String,
 
     /// Variable name for the libc in the solve script template
-    #[structopt(long, default_value = "libc")]
+    #[arg(long, default_value = "libc")]
     pub template_libc_name: String,
 
     /// Variable name for the linker in the solve script template
-    #[structopt(long, default_value = "ld")]
+    #[arg(long, default_value = "ld")]
     pub template_ld_name: String,
 
     /// Create a uv virtual environment with pwntools installed
-    #[structopt(long)]
+    #[arg(long)]
     pub uv: bool,
 
     /// Skip patching the binary entirely
-    #[structopt(long)]
+    #[arg(long)]
     pub no_patch_bin: bool,
 
     /// Use manual ELF byte patching instead of patchelf
-    #[structopt(long)]
+    #[arg(long)]
     pub no_patchelf: bool,
 
     /// Skip generating the solve script template
-    #[structopt(long)]
+    #[arg(long)]
     pub no_template: bool,
 }
 
 /// Options for rev challenge initialization
-#[derive(StructOpt, Setters, Clone)]
+#[derive(Args, Setters, Clone)]
 #[setters(generate = "false")]
 #[setters(prefix = "with_")]
 pub struct RevOpts {
     /// Path to the challenge binary (auto-detected if not set)
-    #[structopt(long)]
+    #[arg(long)]
     #[setters(generate)]
     pub bin: Option<PathBuf>,
 
     /// Path to a custom angr solve script template (uses built-in template if not set)
-    #[structopt(long)]
+    #[arg(long)]
     pub template_path: Option<PathBuf>,
 
     /// Variable name for the binary in the solve script template
-    #[structopt(long, default_value = "exe")]
+    #[arg(long, default_value = "exe")]
     pub template_bin_name: String,
 
     /// Create a uv virtual environment with angr + z3 installed
-    #[structopt(long)]
+    #[arg(long)]
     pub uv: bool,
 
     /// Skip generating the solve script template
-    #[structopt(long)]
+    #[arg(long)]
     pub no_template: bool,
 }
 
 /// Options for downloading a libc by version
-#[derive(StructOpt, Clone)]
+#[derive(Args, Clone)]
 pub struct FetchLibcOpts {
     /// glibc version to download from Launchpad, e.g. "2.31"
     pub version: Option<String>,
 
     /// libc fetch backend
-    #[structopt(
-        long,
-        default_value = "launchpad",
-        possible_values = &["launchpad", "docker"]
-    )]
+    #[arg(long, default_value = "launchpad", value_enum)]
     pub source: FetchLibcSource,
 
     /// Target architecture
-    #[structopt(long, default_value = "amd64", possible_values = &["amd64", "i386"])]
+    #[arg(long, default_value = "amd64", value_enum)]
     pub arch: CpuArch,
 
     /// Output path for the downloaded libc
-    #[structopt(long, default_value = "libc.so.6")]
+    #[arg(long, default_value = "libc.so.6")]
     pub output: PathBuf,
 
     /// Additional libc package library to download (repeatable; accepts sonames like libm.so.6)
-    #[structopt(long = "lib", value_name = "NAME")]
+    #[arg(long = "lib", value_name = "NAME")]
     pub extra_libs: Vec<String>,
 
     /// Docker image to extract libc files from, e.g. ubuntu:22.04
-    #[structopt(long)]
+    #[arg(long)]
     pub image: Option<String>,
 
     /// Docker image distro name, used with --release, e.g. ubuntu
-    #[structopt(long)]
+    #[arg(long)]
     pub distro: Option<String>,
 
     /// Docker image distro release/tag, used with --distro, e.g. 22.04
-    #[structopt(long)]
+    #[arg(long)]
     pub release: Option<String>,
 }
 
@@ -347,7 +343,7 @@ mod tests {
 
     #[test]
     fn fetch_libc_accepts_repeated_extra_libs() {
-        let opts = Opts::from_iter_safe([
+        let opts = Opts::try_parse_from([
             "pwninit",
             "fetch-libc",
             "2.31",
@@ -366,7 +362,7 @@ mod tests {
 
     #[test]
     fn fetch_libc_defaults_to_no_extra_libs() {
-        let opts = Opts::from_iter_safe(["pwninit", "fetch-libc", "2.31"])
+        let opts = Opts::try_parse_from(["pwninit", "fetch-libc", "2.31"])
             .expect("fetch-libc should parse without --lib");
 
         let Some(Command::FetchLibc(fetch_opts)) = opts.cmd else {
@@ -377,7 +373,7 @@ mod tests {
 
     #[test]
     fn pwn_flow_does_not_accept_extra_libs() {
-        assert!(Opts::from_iter_safe(["pwninit", "--lib", "libm.so.6"]).is_err());
+        assert!(Opts::try_parse_from(["pwninit", "--lib", "libm.so.6"]).is_err());
     }
 
     // -------------------------------------------------------------------
@@ -387,7 +383,7 @@ mod tests {
     fn parse_fetch_libc(args: &[&str]) -> crate::opts::FetchLibcOpts {
         let mut full = vec!["pwninit", "fetch-libc"];
         full.extend_from_slice(args);
-        let opts = Opts::from_iter_safe(&full).expect("fetch-libc should parse");
+        let opts = Opts::try_parse_from(&full).expect("fetch-libc should parse");
         match opts.cmd {
             Some(Command::FetchLibc(fetch_opts)) => fetch_opts,
             Some(Command::Rev(_)) => panic!("expected fetch-libc command, got rev"),
@@ -417,7 +413,7 @@ mod tests {
     #[test]
     fn fetch_libc_invalid_arch_is_rejected() {
         assert!(
-            Opts::from_iter_safe(["pwninit", "fetch-libc", "2.31", "--arch", "armhf"]).is_err(),
+            Opts::try_parse_from(["pwninit", "fetch-libc", "2.31", "--arch", "armhf"]).is_err(),
             "fetch-libc should reject architectures other than amd64 and i386"
         );
     }
@@ -488,12 +484,12 @@ mod tests {
         // `--arch` belongs to `fetch-libc`, not the pwn flow. A user
         // passing it to the default pwn flow must get a parse error.
         assert!(
-            Opts::from_iter_safe(["pwninit", "--arch", "amd64"]).is_err(),
+            Opts::try_parse_from(["pwninit", "--arch", "amd64"]).is_err(),
             "pwn flow should not accept --arch"
         );
         // `--output` is also fetch-libc-only.
         assert!(
-            Opts::from_iter_safe(["pwninit", "--output", "libc.so.6"]).is_err(),
+            Opts::try_parse_from(["pwninit", "--output", "libc.so.6"]).is_err(),
             "pwn flow should not accept --output"
         );
     }
@@ -501,11 +497,11 @@ mod tests {
     #[test]
     fn rev_subcommand_does_not_accept_fetch_libc_flags() {
         assert!(
-            Opts::from_iter_safe(["pwninit", "rev", "--lib", "libm.so.6"]).is_err(),
+            Opts::try_parse_from(["pwninit", "rev", "--lib", "libm.so.6"]).is_err(),
             "rev should not accept --lib"
         );
         assert!(
-            Opts::from_iter_safe(["pwninit", "rev", "--arch", "amd64"]).is_err(),
+            Opts::try_parse_from(["pwninit", "rev", "--arch", "amd64"]).is_err(),
             "rev should not accept --arch"
         );
     }
@@ -514,7 +510,7 @@ mod tests {
     fn fetch_libc_lib_outside_subcommand_is_rejected() {
         // `--lib` lives under `fetch-libc`; passing it to `rev` or to the
         // pwn flow must fail parsing.
-        assert!(Opts::from_iter_safe(["pwninit", "rev", "--lib", "libm.so.6"]).is_err());
-        assert!(Opts::from_iter_safe(["pwninit", "--lib", "libm.so.6"]).is_err());
+        assert!(Opts::try_parse_from(["pwninit", "rev", "--lib", "libm.so.6"]).is_err());
+        assert!(Opts::try_parse_from(["pwninit", "--lib", "libm.so.6"]).is_err());
     }
 }
