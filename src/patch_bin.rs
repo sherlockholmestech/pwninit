@@ -1,4 +1,5 @@
 use crate::opts::{PatchMode, PwnOpts};
+use crate::output;
 use crate::warn::Warn;
 
 use std::collections::BTreeMap;
@@ -86,13 +87,16 @@ struct PatchTarget {
 ///
 /// Run `patchelf` once per option to avoid broken offsets/symbols (#297)
 fn patch_with_patchelf(bin: &Path, opts: &PwnOpts) -> Result<()> {
-    println!(
-        "{}",
-        format!("running patchelf on {}", bin.to_string_lossy().bold()).green()
-    );
+    output::progress(format!("running patchelf on {}", bin.to_string_lossy().bold()).green());
 
-    if opts.libc.is_some() {
+    let local_libs = discover_local_libs().context(ScanLibsSnafu)?;
+    if !local_libs.is_empty() || opts.libc.is_some() {
         run_patchelf_option(bin, "--set-rpath", &PathBuf::from("."))?;
+    }
+    for (logical_name, target_path) in local_libs {
+        if logical_name != "ld" && logical_name != "libc" {
+            ensure_symlink(&logical_name, &target_path)?;
+        }
     }
     if opts.ld.is_some() {
         run_patchelf_option(bin, "--set-interpreter", &PathBuf::from("./ld"))?;
@@ -144,23 +148,46 @@ fn is_valid_logical_lib_base(base: &str) -> bool {
     base.chars().any(|ch| ch.is_ascii_alphanumeric())
 }
 
+fn manual_needed_replacement(logical_name: &str) -> String {
+    format!("./{logical_name}")
+}
+
 fn discover_local_libs() -> io::Result<HashMap<String, PathBuf>> {
     let mut libs = HashMap::new();
+    let mut paths = fs::read_dir(".")?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    paths.sort();
 
-    for dir_ent in fs::read_dir(".")? {
-        let dir_ent = dir_ent?;
-        let path = dir_ent.path();
+    for path in paths {
         let file_name = match path.file_name().and_then(OsStr::to_str) {
             Some(name) => name,
             None => continue,
         };
 
         if let Some(logical) = logical_lib_name(file_name) {
-            libs.insert(logical, path);
+            let prefer_path = libs
+                .get(&logical)
+                .and_then(|current: &PathBuf| current.file_name().and_then(OsStr::to_str))
+                .map(|current| {
+                    local_library_name_score(file_name) < local_library_name_score(current)
+                })
+                .unwrap_or(true);
+            if prefer_path {
+                libs.insert(logical, path);
+            }
         }
     }
 
     Ok(libs)
+}
+
+fn local_library_name_score(name: &str) -> u8 {
+    if name.find(".so").is_some_and(|so| !name[..so].contains('-')) {
+        0
+    } else {
+        1
+    }
 }
 
 /// Compute the file offset of the dynamic string table (.dynstr).
@@ -268,7 +295,7 @@ fn collect_manual_targets(
                 offset,
                 slot_len,
                 original: original.to_string(),
-                replacement: format!("./{}", logical),
+                replacement: manual_needed_replacement(&logical),
             });
             symlinks.insert(logical, target_path.clone());
         }
@@ -333,14 +360,13 @@ fn make_symlink(link: &Path, target: &Path) -> Result<()> {
         }
     }
 
-    println!(
-        "{}",
+    output::progress(
         format!(
             "symlinking {} -> {}",
             link.to_string_lossy().bold(),
             target.to_string_lossy().bold()
         )
-        .green()
+        .green(),
     );
     std::os::unix::fs::symlink(target, link).context(SymlinkSnafu {
         link: link.to_path_buf(),
@@ -353,10 +379,7 @@ fn ensure_symlink(logical_name: &str, target_path: &Path) -> Result<()> {
 }
 
 fn patch_manually(bin_patched: &Path, opts: &PwnOpts) -> Result<()> {
-    println!(
-        "{}",
-        format!("patching {} manually", bin_patched.to_string_lossy().bold()).green()
-    );
+    output::progress(format!("patching {} manually", bin_patched.to_string_lossy().bold()).green());
 
     let mut bytes = fs::read(bin_patched).context(ReadBinSnafu {
         path: bin_patched.to_path_buf(),
@@ -379,14 +402,13 @@ fn patch_manually(bin_patched: &Path, opts: &PwnOpts) -> Result<()> {
 
     for target in &targets {
         if apply_in_place_patch(&mut bytes, target) {
-            println!(
-                "{}",
+            output::progress(
                 format!(
                     "patched {} -> {}",
                     target.original.bold(),
                     target.replacement.bold()
                 )
-                .green()
+                .green(),
             );
         }
     }
@@ -445,9 +467,9 @@ fn bin_patched_path_from_bin(bin: &Path) -> Result<PathBuf> {
 
 /// Add "_patched" to the end of the binary file name if the binary got patched.
 pub fn bin_patched_path(opts: &PwnOpts) -> Option<PathBuf> {
-    match opts.no_patch_bin {
-        true => None,
-        false => opts
+    match opts.resolved_patch_mode() {
+        None => None,
+        Some(_) => opts
             .bin
             .as_ref()
             .and_then(|bin| bin_patched_path_from_bin(bin).ok()),
@@ -458,14 +480,13 @@ pub fn bin_patched_path(opts: &PwnOpts) -> Option<PathBuf> {
 /// Return the path to the new file.
 fn copy_patched(bin: &Path) -> Result<PathBuf> {
     let bin_patched = bin_patched_path_from_bin(bin)?;
-    println!(
-        "{}",
+    output::progress(
         format!(
             "copying {} to {}",
             bin.to_string_lossy().bold(),
             bin_patched.to_string_lossy().bold()
         )
-        .green()
+        .green(),
     );
     fs::copy(bin, &bin_patched).context(CopyPatchedSnafu)?;
 
@@ -482,7 +503,7 @@ pub fn patch_bin(opts: &PwnOpts) -> Result<()> {
         let bin_patched = copy_patched(bin)?;
 
         match opts.resolved_patch_mode() {
-            PatchMode::Patchelf => {
+            Some(PatchMode::Patchelf) => {
                 if let Some(libc) = &opts.libc {
                     symlink_libc(libc)?;
                     ensure_symlink("libc", libc)?;
@@ -492,9 +513,10 @@ pub fn patch_bin(opts: &PwnOpts) -> Result<()> {
                 }
                 patch_with_patchelf(&bin_patched, opts)?;
             }
-            PatchMode::Manual => {
+            Some(PatchMode::Manual) => {
                 patch_manually(&bin_patched, opts)?;
             }
+            None => {}
         }
     }
 
@@ -543,5 +565,16 @@ mod tests {
         assert_eq!(logical_lib_name("notlib.so.1"), None);
         assert_eq!(logical_lib_name("libbroken"), None);
         assert_eq!(logical_lib_name("lib-.so"), None);
+    }
+
+    #[test]
+    fn manual_patching_uses_short_local_library_aliases() {
+        assert_eq!(manual_needed_replacement("libm"), "./libm");
+        assert_eq!(manual_needed_replacement("libnss_dns"), "./libnss_dns");
+    }
+
+    #[test]
+    fn soname_files_are_preferred_over_versioned_library_files() {
+        assert!(local_library_name_score("libm.so.6") < local_library_name_score("libm-2.31.so"));
     }
 }

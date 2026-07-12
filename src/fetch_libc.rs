@@ -6,6 +6,7 @@ use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
 use crate::libc_deb;
 use crate::libc_search;
 use crate::libc_version::LibcVersion;
+use crate::output;
 
 use std::collections::HashSet;
 use std::io;
@@ -34,6 +35,28 @@ pub enum Error {
 
     #[snafu(display("failed to read user input: {}", source))]
     Stdin { source: io::Error },
+
+    #[snafu(display("version selection ended before a choice was made"))]
+    SelectionEof,
+
+    #[snafu(display(
+        "multiple versions matched in non-interactive mode: {}; use --exact-version",
+        candidates
+    ))]
+    AmbiguousSelection { candidates: String },
+
+    #[snafu(display(
+        "exact version {} was not found; available versions: {}",
+        version,
+        candidates
+    ))]
+    ExactVersionNotFound { version: String, candidates: String },
+
+    #[snafu(display("failed creating output directory {}: {}", path.display(), source))]
+    CreateOutputDir {
+        path: std::path::PathBuf,
+        source: io::Error,
+    },
 
     #[snafu(display("failed fetching linker: {}", source))]
     FetchLd { source: fetch_ld::Error },
@@ -66,7 +89,7 @@ const LIBM_SONAME: &str = "libm.so.6";
 const LIBPTHREAD_SONAME: &str = "libpthread.so.0";
 
 pub fn fetch_libc(ver: &LibcVersion, out_path: &Path) -> Result {
-    println!("{}", "fetching libc".yellow().bold());
+    output::progress("fetching libc".yellow().bold());
 
     fetch_libc_package_file(ver, LIBC_SONAME, out_path)
 }
@@ -183,7 +206,7 @@ pub(crate) fn fetch_libc_lib_with(
     validate_extra_lib_name(lib_name)?;
     let soname = normalize_extra_lib_name(lib_name);
 
-    println!("{}", format!("fetching {}", soname).yellow().bold());
+    output::progress(format!("fetching {}", soname).yellow().bold());
     fetch_libc_package_file_with(ver, soname, Path::new(soname), base_url, policy, sleeper)
 }
 
@@ -212,16 +235,29 @@ pub fn docker_image_name(
     }
 }
 
+#[allow(dead_code)]
 pub fn fetch_libc_from_docker(
     image: &str,
     arch: CpuArch,
     out_path: &Path,
     extra_libs: &[String],
 ) -> Result {
-    let extra_libs = normalize_extra_libs(extra_libs)?;
-    docker_libc::extract_libc_files(image, arch, out_path, &extra_libs).context(DockerSnafu)
+    fetch_libc_from_docker_to(image, arch, out_path, Path::new("."), extra_libs)
 }
 
+pub fn fetch_libc_from_docker_to(
+    image: &str,
+    arch: CpuArch,
+    out_path: &Path,
+    out_dir: &Path,
+    extra_libs: &[String],
+) -> Result {
+    let extra_libs = normalize_extra_libs(extra_libs)?;
+    docker_libc::extract_libc_files(image, arch, out_path, out_dir, &extra_libs)
+        .context(DockerSnafu)
+}
+
+#[allow(dead_code)]
 pub fn fetch_libc_from_debian(
     short_version: &str,
     arch: CpuArch,
@@ -230,10 +266,7 @@ pub fn fetch_libc_from_debian(
     out_path: &Path,
     extra_libs: &[String],
 ) -> Result {
-    let mut sleeper = StdSleeper;
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
-    fetch_libc_from_debian_with(
+    fetch_libc_from_debian_selected(
         short_version,
         arch,
         release,
@@ -241,14 +274,53 @@ pub fn fetch_libc_from_debian(
         out_path,
         Path::new("."),
         extra_libs,
-        RetryPolicy::default(),
-        &mut sleeper,
-        &mut input,
-        &mut io::stdout(),
+        false,
+        None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn fetch_libc_from_debian_selected(
+    short_version: &str,
+    arch: CpuArch,
+    release: &str,
+    repo_url: &str,
+    out_path: &Path,
+    out_dir: &Path,
+    extra_libs: &[String],
+    non_interactive: bool,
+    exact_version: Option<&str>,
+) -> Result {
+    let mut sleeper = StdSleeper;
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let mut sink = io::sink();
+    let output: &mut dyn io::Write = if output::is_json() {
+        &mut sink
+    } else {
+        &mut stdout
+    };
+    fetch_libc_from_debian_selected_with(
+        short_version,
+        arch,
+        release,
+        repo_url,
+        out_path,
+        out_dir,
+        extra_libs,
+        RetryPolicy::default(),
+        &mut sleeper,
+        &mut input,
+        output,
+        non_interactive,
+        exact_version,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) fn fetch_libc_from_debian_with(
     short_version: &str,
     arch: CpuArch,
@@ -261,6 +333,39 @@ pub(crate) fn fetch_libc_from_debian_with(
     sleeper: &mut dyn Sleeper,
     input: &mut dyn io::BufRead,
     output: &mut dyn io::Write,
+) -> Result {
+    fetch_libc_from_debian_selected_with(
+        short_version,
+        arch,
+        release,
+        repo_url,
+        out_path,
+        out_dir,
+        extra_libs,
+        policy,
+        sleeper,
+        input,
+        output,
+        false,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_libc_from_debian_selected_with(
+    short_version: &str,
+    arch: CpuArch,
+    release: &str,
+    repo_url: &str,
+    out_path: &Path,
+    out_dir: &Path,
+    extra_libs: &[String],
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+    input: &mut dyn io::BufRead,
+    output: &mut dyn io::Write,
+    non_interactive: bool,
+    exact_version: Option<&str>,
 ) -> Result {
     writeln!(
         output,
@@ -281,37 +386,11 @@ pub(crate) fn fetch_libc_from_debian_with(
         return Err(Error::NoVersionsFound);
     }
 
-    let choice = if packages.len() == 1 {
-        writeln!(output, "  {}", packages[0].version).ok();
-        0
-    } else {
-        writeln!(output).ok();
-        for (i, package) in packages.iter().enumerate() {
-            writeln!(output, "  [{}]  {}", i + 1, package.version).ok();
-        }
-        writeln!(output).ok();
-
-        loop {
-            write!(output, "select version: ").ok();
-            output.flush().ok();
-
-            let mut line = String::new();
-            input.read_line(&mut line).context(StdinSnafu)?;
-
-            let trimmed = line.trim();
-            if let Ok(n) = trimmed.parse::<usize>() {
-                if n >= 1 && n <= packages.len() {
-                    break n - 1;
-                }
-            }
-            writeln!(
-                output,
-                "please enter a number between 1 and {}",
-                packages.len()
-            )
-            .ok();
-        }
-    };
+    let versions = packages
+        .iter()
+        .map(|package| package.version.clone())
+        .collect::<Vec<_>>();
+    let choice = select_version(&versions, non_interactive, exact_version, input, output)?;
 
     let package = &packages[choice];
     let ver = LibcVersion::from_parts(package.version.clone(), arch).context(VersionSnafu)?;
@@ -348,27 +427,59 @@ pub(crate) fn fetch_libc_from_debian_with(
 
 /// Search for available libc6 versions matching `short_version`, prompt the
 /// user to select one, then download it to `out_path`.
+#[allow(dead_code)]
 pub fn fetch_libc_interactive(
     short_version: &str,
     arch: CpuArch,
     out_path: &Path,
     extra_libs: &[String],
 ) -> Result {
-    let mut sleeper = StdSleeper;
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
-    fetch_libc_interactive_with(
+    fetch_libc_selected(
         short_version,
         arch,
         out_path,
         Path::new("."),
+        extra_libs,
+        false,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn fetch_libc_selected(
+    short_version: &str,
+    arch: CpuArch,
+    out_path: &Path,
+    out_dir: &Path,
+    extra_libs: &[String],
+    non_interactive: bool,
+    exact_version: Option<&str>,
+) -> Result {
+    let mut sleeper = StdSleeper;
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let mut sink = io::sink();
+    let output: &mut dyn io::Write = if output::is_json() {
+        &mut sink
+    } else {
+        &mut stdout
+    };
+    fetch_libc_selected_with(
+        short_version,
+        arch,
+        out_path,
+        out_dir,
         extra_libs,
         libc_search::LAUNCHPAD_API_BASE,
         libc_deb::PKG_URL,
         RetryPolicy::default(),
         &mut sleeper,
         &mut input,
-        &mut io::stdout(),
+        output,
+        non_interactive,
+        exact_version,
     )
 }
 
@@ -381,6 +492,7 @@ pub fn fetch_libc_interactive(
 /// multi-match flow honors the supplied selection and retries only the
 /// failed HTTP operation.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) fn fetch_libc_interactive_with(
     short_version: &str,
     arch: CpuArch,
@@ -394,6 +506,39 @@ pub(crate) fn fetch_libc_interactive_with(
     input: &mut dyn io::BufRead,
     output: &mut dyn io::Write,
 ) -> Result {
+    fetch_libc_selected_with(
+        short_version,
+        arch,
+        out_path,
+        out_dir,
+        extra_libs,
+        api_base,
+        pkg_base,
+        policy,
+        sleeper,
+        input,
+        output,
+        false,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fetch_libc_selected_with(
+    short_version: &str,
+    arch: CpuArch,
+    out_path: &Path,
+    out_dir: &Path,
+    extra_libs: &[String],
+    api_base: &str,
+    pkg_base: &str,
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+    input: &mut dyn io::BufRead,
+    output: &mut dyn io::Write,
+    non_interactive: bool,
+    exact_version: Option<&str>,
+) -> Result {
     let versions =
         libc_search::search_versions_with(short_version, &arch, api_base, policy, sleeper)
             .context(SearchSnafu)?;
@@ -402,37 +547,7 @@ pub(crate) fn fetch_libc_interactive_with(
         return Err(Error::NoVersionsFound);
     }
 
-    let choice = if versions.len() == 1 {
-        writeln!(output, "  {}", versions[0]).ok();
-        0
-    } else {
-        writeln!(output).ok();
-        for (i, v) in versions.iter().enumerate() {
-            writeln!(output, "  [{}]  {}", i + 1, v).ok();
-        }
-        writeln!(output).ok();
-
-        loop {
-            write!(output, "select version: ").ok();
-            output.flush().ok();
-
-            let mut line = String::new();
-            input.read_line(&mut line).context(StdinSnafu)?;
-
-            let trimmed = line.trim();
-            if let Ok(n) = trimmed.parse::<usize>() {
-                if n >= 1 && n <= versions.len() {
-                    break n - 1;
-                }
-            }
-            writeln!(
-                output,
-                "please enter a number between 1 and {}",
-                versions.len()
-            )
-            .ok();
-        }
-    };
+    let choice = select_version(&versions, non_interactive, exact_version, input, output)?;
 
     let full_version = versions[choice].clone();
     let ver = LibcVersion::from_parts(full_version, arch).context(VersionSnafu)?;
@@ -447,6 +562,59 @@ pub(crate) fn fetch_libc_interactive_with(
         fetch_libc_package_file_with(&ver, extra_lib, &lib_out, pkg_base, policy, sleeper)?;
     }
     Ok(())
+}
+
+fn select_version(
+    versions: &[String],
+    non_interactive: bool,
+    exact_version: Option<&str>,
+    input: &mut dyn io::BufRead,
+    output: &mut dyn io::Write,
+) -> Result<usize> {
+    let candidates = versions.join(", ");
+    if let Some(exact) = exact_version {
+        return versions
+            .iter()
+            .position(|version| version == exact)
+            .ok_or_else(|| Error::ExactVersionNotFound {
+                version: exact.to_string(),
+                candidates,
+            });
+    }
+    if versions.len() == 1 {
+        writeln!(output, "  {}", versions[0]).ok();
+        return Ok(0);
+    }
+    if non_interactive {
+        return Err(Error::AmbiguousSelection { candidates });
+    }
+
+    writeln!(output).ok();
+    for (i, version) in versions.iter().enumerate() {
+        writeln!(output, "  [{}]  {}", i + 1, version).ok();
+    }
+    writeln!(output).ok();
+    loop {
+        write!(output, "select version: ").ok();
+        output.flush().ok();
+
+        let mut line = String::new();
+        if input.read_line(&mut line).context(StdinSnafu)? == 0 {
+            return Err(Error::SelectionEof);
+        }
+
+        if let Ok(n) = line.trim().parse::<usize>() {
+            if n >= 1 && n <= versions.len() {
+                return Ok(n - 1);
+            }
+        }
+        writeln!(
+            output,
+            "please enter a number between 1 and {}",
+            versions.len()
+        )
+        .ok();
+    }
 }
 
 pub(crate) fn normalize_extra_libs(extra_libs: &[String]) -> std::result::Result<Vec<&str>, Error> {
@@ -475,6 +643,36 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
+
+    #[test]
+    fn version_selection_returns_error_on_eof() {
+        let versions = vec!["2.31-1".to_string(), "2.31-2".to_string()];
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let err = select_version(&versions, false, None, &mut input, &mut output)
+            .expect_err("EOF should stop selection");
+        assert!(matches!(err, Error::SelectionEof));
+    }
+
+    #[test]
+    fn non_interactive_selection_rejects_ambiguity() {
+        let versions = vec!["2.31-1".to_string(), "2.31-2".to_string()];
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let err = select_version(&versions, true, None, &mut input, &mut output)
+            .expect_err("ambiguous non-interactive selection should fail");
+        assert!(matches!(err, Error::AmbiguousSelection { .. }));
+    }
+
+    #[test]
+    fn exact_version_selection_does_not_read_input() {
+        let versions = vec!["2.31-1".to_string(), "2.31-2".to_string()];
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let choice = select_version(&versions, true, Some("2.31-2"), &mut input, &mut output)
+            .expect("exact version should be selected");
+        assert_eq!(choice, 1);
+    }
 
     use flate2::write::GzEncoder;
     use flate2::Compression;

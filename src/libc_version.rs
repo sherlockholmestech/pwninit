@@ -2,6 +2,7 @@
 
 use crate::cpu_arch;
 use crate::cpu_arch::CpuArch;
+use crate::output;
 
 use std::fmt;
 use std::path::Path;
@@ -80,10 +81,10 @@ impl LibcVersion {
         match version_compare::compare_to(&self.string_short, "2.34", Cmp::Lt) {
             Ok(is_pre_234) => is_pre_234,
             Err(()) => {
-                eprintln!(
-                    "warning: failed parsing libc version {}; assuming glibc >= 2.34",
+                output::warning(format!(
+                    "failed parsing libc version {}; assuming glibc >= 2.34",
                     self.string_short
-                );
+                ));
                 false
             }
         }

@@ -2,6 +2,7 @@
 
 use crate::cpu_arch::CpuArch;
 use crate::http_retry::{self, RetryPolicy, Sleeper, StdSleeper};
+use crate::output;
 
 use colored::Colorize;
 use serde::Deserialize;
@@ -75,14 +76,13 @@ pub(crate) fn search_versions_with(
     policy: RetryPolicy,
     sleeper: &mut dyn Sleeper,
 ) -> Result<Vec<String>> {
-    println!(
-        "{}",
+    output::progress(
         format!(
             "searching Launchpad for libc6 {}* ({})",
             short_version, arch
         )
         .cyan()
-        .bold()
+        .bold(),
     );
 
     let arch_str = arch.to_string();

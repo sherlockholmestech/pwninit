@@ -15,14 +15,13 @@ use snafu::ResultExt;
 use snafu::Snafu;
 
 use crate::http_retry::{self, RetryPolicy, Sleeper, StdSleeper};
+use crate::output;
 
 /// Ubuntu primary archive package file endpoint used for glibc deb downloads.
 pub const PKG_URL: &str = "https://launchpad.net/ubuntu/+archive/primary/+files";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Helper function that decides whether the tar file `entry` matches
-/// one of the `file_names`
 fn tar_entry_matches_any<R: Read>(
     entry: &std::io::Result<tar::Entry<R>>,
     file_names: &[&str],
@@ -30,20 +29,19 @@ fn tar_entry_matches_any<R: Read>(
     let Ok(entry) = entry else { return false };
     let Ok(path) = entry.path() else { return false };
 
-    let res = path
+    let matched = path
         .file_name()
         .and_then(|name| name.to_str())
         .map(|name| file_names.contains(&name))
         .unwrap_or(false);
-    if res {
-        println!(
-            "{}",
+    if matched {
+        output::progress(
             format!("Found matching file: {}", path.display())
                 .bold()
-                .green()
+                .green(),
         );
     }
-    res
+    matched
 }
 
 #[derive(Debug, Snafu)]
@@ -133,7 +131,7 @@ pub(crate) fn write_deb_url_file_with<P: AsRef<Path>>(
     sleeper: &mut dyn Sleeper,
 ) -> Result<()> {
     let out_path = out_path.as_ref();
-    println!("{}", url.green().bold());
+    output::progress(url.green().bold());
 
     let deb_bytes = match http_retry::get_bytes(&url, policy, sleeper) {
         Ok((bytes, _trace)) => bytes,

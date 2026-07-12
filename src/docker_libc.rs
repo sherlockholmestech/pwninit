@@ -1,5 +1,6 @@
 use crate::cpu_arch::CpuArch;
 use crate::fetch_ld;
+use crate::output;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -62,7 +63,7 @@ struct ExtractTarget {
 #[derive(Clone, Debug)]
 enum ExtractOutput {
     Fixed(PathBuf),
-    MatchedFileName,
+    MatchedFileNameIn(PathBuf),
 }
 
 #[derive(Debug)]
@@ -107,12 +108,14 @@ fn musl_arch_name(arch: CpuArch) -> &'static str {
 }
 
 fn run_docker_status(action: &str, args: &[&str]) -> Result {
-    let status = Command::new("docker")
-        .args(args)
-        .status()
-        .context(DockerExecSnafu {
-            action: action.to_string(),
-        })?;
+    let mut command = Command::new("docker");
+    command.args(args);
+    if output::is_json() {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let status = command.status().context(DockerExecSnafu {
+        action: action.to_string(),
+    })?;
 
     if status.success() {
         Ok(())
@@ -246,7 +249,7 @@ fn output_paths(output: &[ExtractOutput], matched_file_name: &str) -> Vec<PathBu
     for out in output {
         let path = match out {
             ExtractOutput::Fixed(path) => path.clone(),
-            ExtractOutput::MatchedFileName => PathBuf::from(matched_file_name),
+            ExtractOutput::MatchedFileNameIn(dir) => dir.join(matched_file_name),
         };
         if !paths.contains(&path) {
             paths.push(path);
@@ -319,8 +322,7 @@ fn extract_from_tar(reader: impl Read, plan: &ExtractionPlan) -> Result {
             .and_then(OsStr::to_str)
             .unwrap_or(&target.label);
         for out_path in output_paths(&target.outputs, matched_file_name) {
-            println!(
-                "{}",
+            output::progress(
                 format!(
                     "extracting {} from {} to {}",
                     target.label,
@@ -328,7 +330,7 @@ fn extract_from_tar(reader: impl Read, plan: &ExtractionPlan) -> Result {
                     out_path.display()
                 )
                 .yellow()
-                .bold()
+                .bold(),
             );
             fs::write(&out_path, &found[0].bytes).context(WriteSnafu { path: out_path })?;
         }
@@ -345,15 +347,12 @@ fn fixed_target(label: &str, candidates: &[&str], out_path: impl Into<PathBuf>) 
     }
 }
 
-fn matched_target(label: &str, candidates: &[&str]) -> ExtractTarget {
-    ExtractTarget {
-        label: label.to_string(),
-        candidates: candidates.iter().map(|name| (*name).to_string()).collect(),
-        outputs: vec![ExtractOutput::MatchedFileName],
-    }
-}
-
-fn extraction_plan(arch: CpuArch, libc_out: &Path, extra_libs: &[&str]) -> ExtractionPlan {
+fn extraction_plan(
+    arch: CpuArch,
+    libc_out: &Path,
+    out_dir: &Path,
+    extra_libs: &[&str],
+) -> ExtractionPlan {
     let gnu_ld_name = fetch_ld::canonical_ld_name(&arch);
     let musl_arch = musl_arch_name(arch);
     let musl_ld_name = format!("ld-musl-{}.so.1", musl_arch);
@@ -361,31 +360,31 @@ fn extraction_plan(arch: CpuArch, libc_out: &Path, extra_libs: &[&str]) -> Extra
 
     let mut gnu_targets = vec![
         fixed_target("libc.so.6", &["libc.so.6"], libc_out),
-        matched_target(gnu_ld_name, &[gnu_ld_name]),
+        fixed_target(gnu_ld_name, &[gnu_ld_name], out_dir.join(gnu_ld_name)),
     ];
     let mut musl_targets = vec![
         ExtractTarget {
             label: musl_ld_name.clone(),
             candidates: vec![musl_ld_name.clone()],
-            outputs: vec![ExtractOutput::MatchedFileName],
+            outputs: vec![ExtractOutput::MatchedFileNameIn(out_dir.to_path_buf())],
         },
         ExtractTarget {
             label: musl_libc_name.clone(),
             candidates: vec![musl_libc_name.clone(), musl_ld_name.clone()],
             outputs: vec![
                 ExtractOutput::Fixed(libc_out.to_path_buf()),
-                ExtractOutput::Fixed(PathBuf::from(&musl_libc_name)),
-                ExtractOutput::MatchedFileName,
+                ExtractOutput::Fixed(out_dir.join(&musl_libc_name)),
+                ExtractOutput::MatchedFileNameIn(out_dir.to_path_buf()),
             ],
         },
     ];
 
     for lib in extra_libs {
         if gnu_targets.iter().all(|target| target.label != *lib) {
-            gnu_targets.push(fixed_target(lib, &[*lib], PathBuf::from(lib)));
+            gnu_targets.push(fixed_target(lib, &[*lib], out_dir.join(lib)));
         }
         if musl_targets.iter().all(|target| target.label != *lib) {
-            musl_targets.push(fixed_target(lib, &[*lib], PathBuf::from(lib)));
+            musl_targets.push(fixed_target(lib, &[*lib], out_dir.join(lib)));
         }
     }
 
@@ -399,16 +398,16 @@ pub fn extract_libc_files(
     image: &str,
     arch: CpuArch,
     libc_out: &Path,
+    out_dir: &Path,
     extra_libs: &[&str],
 ) -> Result {
     let platform = docker_platform(arch);
-    let plan = extraction_plan(arch, libc_out, extra_libs);
+    let plan = extraction_plan(arch, libc_out, out_dir, extra_libs);
 
-    println!(
-        "{}",
+    output::progress(
         format!("pulling docker image {} ({})", image, platform)
             .cyan()
-            .bold()
+            .bold(),
     );
     run_docker_status("pull", &["pull", "--platform", platform, image])?;
     let container = create_container(image, platform)?;
@@ -447,7 +446,7 @@ mod tests {
     fn extracts_runtime_libraries_from_exported_filesystem() {
         let tmp = TempDir::new().expect("tmpdir");
         let libc_out = tmp.path().join("libc.so.6");
-        let plan = extraction_plan(CpuArch::Amd64, &libc_out, &["libm.so.6"]);
+        let plan = extraction_plan(CpuArch::Amd64, &libc_out, tmp.path(), &["libm.so.6"]);
         let tar = tiny_fs_tar(&[
             ("usr/share/doc/libc.so.6", b"wrong"),
             ("usr/lib/x86_64-linux-gnu/libc.so.6", b"libc bytes"),
@@ -460,22 +459,20 @@ mod tests {
 
         assert_eq!(std::fs::read(libc_out).expect("read libc"), b"libc bytes");
         assert_eq!(
-            std::fs::read("libm.so.6").expect("read libm"),
+            std::fs::read(tmp.path().join("libm.so.6")).expect("read libm"),
             b"libm bytes"
         );
         assert_eq!(
-            std::fs::read("ld-linux-x86-64.so.2").expect("read ld"),
+            std::fs::read(tmp.path().join("ld-linux-x86-64.so.2")).expect("read ld"),
             b"ld bytes"
         );
-        let _ = std::fs::remove_file("libm.so.6");
-        let _ = std::fs::remove_file("ld-linux-x86-64.so.2");
     }
 
     #[test]
     fn extracts_musl_runtime_from_exported_filesystem() {
         let tmp = TempDir::new().expect("tmpdir");
         let libc_out = tmp.path().join("libc.so.6");
-        let plan = extraction_plan(CpuArch::Amd64, &libc_out, &[]);
+        let plan = extraction_plan(CpuArch::Amd64, &libc_out, tmp.path(), &[]);
         let tar = tiny_fs_tar(&[("lib/ld-musl-x86_64.so.1", b"musl bytes")]);
 
         let decoder = flate2::read::GzDecoder::new(Cursor::new(tar));
@@ -483,21 +480,24 @@ mod tests {
 
         assert_eq!(std::fs::read(libc_out).expect("read libc"), b"musl bytes");
         assert_eq!(
-            std::fs::read("ld-musl-x86_64.so.1").expect("read musl ld"),
+            std::fs::read(tmp.path().join("ld-musl-x86_64.so.1")).expect("read musl ld"),
             b"musl bytes"
         );
         assert_eq!(
-            std::fs::read("libc.musl-x86_64.so.1").expect("read musl libc soname"),
+            std::fs::read(tmp.path().join("libc.musl-x86_64.so.1")).expect("read musl libc soname"),
             b"musl bytes"
         );
-        let _ = std::fs::remove_file("ld-musl-x86_64.so.1");
-        let _ = std::fs::remove_file("libc.musl-x86_64.so.1");
     }
 
     #[test]
     fn reports_missing_requested_library() {
         let tmp = TempDir::new().expect("tmpdir");
-        let plan = extraction_plan(CpuArch::Amd64, &tmp.path().join("libc.so.6"), &[]);
+        let plan = extraction_plan(
+            CpuArch::Amd64,
+            &tmp.path().join("libc.so.6"),
+            tmp.path(),
+            &[],
+        );
         let tar = tiny_fs_tar(&[("usr/lib/x86_64-linux-gnu/libm.so.6", b"libm")]);
         let decoder = flate2::read::GzDecoder::new(Cursor::new(tar));
         let err = extract_from_tar(decoder, &plan).expect_err("missing libc should fail");

@@ -11,6 +11,7 @@ mod libc_deb;
 mod libc_search;
 mod libc_version;
 pub mod opts;
+pub mod output;
 mod patch_bin;
 mod pwninit;
 mod set_exec;
@@ -20,6 +21,7 @@ mod uv_venv;
 mod warn;
 
 pub use crate::pwninit::run;
+pub use crate::pwninit::run_with_summary;
 pub use crate::pwninit::Result;
 
 use crate::elf::detect::is_elf;
@@ -56,7 +58,12 @@ pub fn is_bin(path: &Path) -> elf::detect::Result<bool> {
         .and_then(|n| n.to_str())
         .map(|n| n.ends_with("_patched"))
         .unwrap_or(false);
-    Ok(!is_patched && is_elf(path)? && !is_libc(path)? && !is_ld(path)?)
+    let is_shared_object = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(".so") || name.contains(".so."))
+        .unwrap_or(false);
+    Ok(!is_patched && !is_shared_object && is_elf(path)?)
 }
 
 /// Detect whether the filename of `path` starts with one of `prefixes`.
@@ -126,13 +133,16 @@ fn needed_libraries(bin: &Path) -> elf::parse::Result<Vec<String>> {
     Ok(elf.libraries.iter().map(|name| name.to_string()).collect())
 }
 
-pub(crate) fn needed_glibc_libraries(opts: &PwnOpts) -> Vec<String> {
+pub(crate) fn needed_glibc_libraries_result(opts: &PwnOpts) -> elf::parse::Result<Vec<String>> {
     let Some(bin) = &opts.bin else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+    needed_libraries(bin).map(missing_glibc_package_libraries)
+}
 
-    match needed_libraries(bin) {
-        Ok(libs) => missing_glibc_package_libraries(libs),
+pub(crate) fn needed_glibc_libraries(opts: &PwnOpts) -> Vec<String> {
+    match needed_glibc_libraries_result(opts) {
+        Ok(libs) => libs,
         Err(err) => {
             err.warn("failed detecting binary library dependencies");
             Vec::new()
@@ -140,11 +150,16 @@ pub(crate) fn needed_glibc_libraries(opts: &PwnOpts) -> Vec<String> {
     }
 }
 
-fn maybe_fetch_needed_libs(opts: &PwnOpts, ver: &LibcVersion) {
+fn maybe_fetch_needed_libs(opts: &PwnOpts, ver: &LibcVersion) -> Vec<String> {
+    let mut failures = Vec::new();
     for lib in needed_glibc_libraries(opts) {
-        fetch_libc::fetch_libc_lib(ver, &lib)
-            .warn(&format!("failed fetching required libc companion {}", lib));
+        if let Err(err) = fetch_libc::fetch_libc_lib(ver, &lib) {
+            let message = format!("failed fetching required libc companion {}: {}", lib, err);
+            output::warning(&message);
+            failures.push(message);
+        }
     }
+    failures
 }
 
 fn maybe_unstrip_libc<F>(
@@ -187,36 +202,47 @@ fn detect_libc_family(libc: &Path) -> LibcFamily {
 /// Top-level function for libc-dependent tasks
 ///   1. Download linker if not found
 ///   2. Unstrip libc if libc is stripped
-fn visit_libc(opts: &PwnOpts, libc: &Path) {
+fn visit_libc(opts: &PwnOpts, libc: &Path) -> Vec<String> {
+    let mut failures = Vec::new();
     if detect_libc_family(libc) == LibcFamily::Musl {
-        println!(
-            "{}",
+        output::progress(
             format!(
                 "detected musl libc {}; skipping glibc-specific fetch/unstrip",
                 libc.to_string_lossy().bold()
             )
-            .yellow()
+            .yellow(),
         );
-        return;
+        return failures;
     }
 
     let ver = match LibcVersion::detect(libc) {
         Ok(ver) => ver,
         Err(err) => {
             err.warn("failed detecting libc version (is the libc an Ubuntu glibc?)");
-            return;
+            return failures;
         }
     };
-    maybe_fetch_ld(opts, &ver, fetch_ld).warn("failed fetching ld");
-    maybe_fetch_needed_libs(opts, &ver);
+    if let Err(err) = maybe_fetch_ld(opts, &ver, fetch_ld) {
+        let message = format!("failed fetching linker: {}", err);
+        output::warning(&message);
+        failures.push(message);
+    }
+    failures.extend(maybe_fetch_needed_libs(opts, &ver));
     maybe_unstrip_libc(opts, libc, &ver, unstrip_libc).warn("failed unstripping libc");
+    failures
 }
 
 /// Same as `visit_libc()`, but doesn't do anything if no libc is found
-pub fn maybe_visit_libc(opts: &PwnOpts) {
+pub(crate) fn maybe_visit_libc_report(opts: &PwnOpts) -> Vec<String> {
     if let Some(libc) = &opts.libc {
         visit_libc(opts, libc)
+    } else {
+        Vec::new()
     }
+}
+
+pub fn maybe_visit_libc(opts: &PwnOpts) {
+    let _ = maybe_visit_libc_report(opts);
 }
 
 fn set_exec_if_needed(
@@ -227,9 +253,8 @@ fn set_exec_if_needed(
 ) -> io::Result<()> {
     match path {
         Some(path) if !path.is_executable() => {
-            println!(
-                "{}",
-                format!("setting {} executable", path.to_string_lossy().bold()).color(color)
+            output::progress(
+                format!("setting {} executable", path.to_string_lossy().bold()).color(color),
             );
             set_exec(path)
         }
@@ -406,6 +431,19 @@ mod tests {
         );
 
         assert_eq!(libs, ["libpthread.so.0", "libnss_dns.so.2"]);
+    }
+
+    #[test]
+    fn shared_objects_are_not_detected_as_challenge_binaries() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let shared_object = tmp.path().join("libm.so.6");
+        std::fs::copy(
+            std::env::current_exe().expect("current exe"),
+            &shared_object,
+        )
+        .expect("copy ELF fixture");
+
+        assert!(!is_bin(&shared_object).expect("detect shared object"));
     }
 
     #[test]

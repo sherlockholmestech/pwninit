@@ -2,21 +2,33 @@
 
 use pwninit::opts::Opts;
 
-use clap::Parser;
-use colored::Colorize;
+use clap::{CommandFactory, Parser};
 
-/// Parse command line options and set up specified directory for pwning
-fn try_main() -> pwninit::Result {
-    // Parse arguments and run
-    let opts = Opts::parse();
-    pwninit::run(opts)?;
-    Ok(())
-}
-
-/// Top-level error catcher
 fn main() {
-    if let Err(err) = try_main() {
-        eprintln!("{}", format!("error: {}", err).red().bold());
-        std::process::exit(1);
+    let opts = Opts::parse();
+    pwninit::output::configure(opts.quiet, opts.verbose, opts.json);
+
+    if let Err(message) = opts.validate() {
+        if opts.json {
+            pwninit::output::error(message);
+            std::process::exit(2);
+        }
+        Opts::command()
+            .error(clap::error::ErrorKind::InvalidValue, message)
+            .exit();
+    }
+
+    match pwninit::run_with_summary(opts) {
+        Ok(summary) => {
+            let success = summary.success();
+            pwninit::output::render_summary(&summary);
+            if !success {
+                std::process::exit(1);
+            }
+        }
+        Err(err) => {
+            pwninit::output::error(err.to_string());
+            std::process::exit(1);
+        }
     }
 }

@@ -3,6 +3,7 @@ use crate::elf;
 use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
 use crate::libc_deb;
 use crate::libc_version::LibcVersion;
+use crate::output;
 
 use std::io::copy;
 use std::io::stderr;
@@ -95,7 +96,7 @@ fn do_unstrip_libc_with_sources(
     sources: Vec<DebugSymbolSource>,
     policy: RetryPolicy,
 ) -> Result {
-    println!("{}", "unstripping libc".yellow().bold());
+    output::progress("unstripping libc".yellow().bold());
 
     let tmp_dir = TempDir::new().context(TmpDirSnafu)?;
 
@@ -115,8 +116,10 @@ fn do_unstrip_libc_with_sources(
         .arg(&sym_path)
         .output()
         .context(CmdRunSnafu)?;
-    let _ = stderr().write_all(&out.stderr);
-    let _ = stdout().write_all(&out.stdout);
+    if !output::is_json() {
+        let _ = stderr().write_all(&out.stderr);
+        let _ = stdout().write_all(&out.stdout);
+    }
     if !out.status.success() {
         return Err(Error::CmdFail { status: out.status });
     }
@@ -151,10 +154,10 @@ fn debug_symbol_sources(ver: &LibcVersion) -> Vec<DebugSymbolSource> {
                 url: package.deb_url,
             }),
             Ok(None) => {}
-            Err(err) => eprintln!(
-                "warning: failed searching Debian {} for libc6-dbg: {}",
+            Err(err) => output::warning(format!(
+                "failed searching Debian {} for libc6-dbg: {}",
                 release, err
-            ),
+            )),
         }
     }
 
@@ -226,10 +229,7 @@ fn fetch_debug_symbols_with_sources(
     };
 
     std::fs::copy(&path, sym_path).context(LibcWriteSnafu)?;
-    println!(
-        "{}",
-        format!("using debug symbols from {}", name).green().bold()
-    );
+    output::progress(format!("using debug symbols from {}", name).green().bold());
     Ok(())
 }
 

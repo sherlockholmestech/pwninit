@@ -19,6 +19,7 @@ A tool for automating starting binary exploit challenges, as well as reverse eng
   - [Virtual Environments](#virtual-environments)
   - [Patching Modes](#patching-modes)
   - [Custom Templates](#custom-templates)
+  - [Output and Automation](#output-and-automation)
 
 ## Installation
 
@@ -38,7 +39,7 @@ Run `pwninit` in a directory containing your challenge files. It will automatica
 $ ls
 hunter  libc.so.6  readme
 
-$ pwninit
+$ pwninit pwn
 bin: ./hunter
 libc: ./libc.so.6
 
@@ -70,17 +71,21 @@ hunter	hunter_patched	ld-2.23.so  libc.so.6  readme  solve.py
 
 ### Pwn Challenges
 
-Simply run `pwninit` in a directory with the relevant files. It automatically detects the binary, libc, and linker.
+Run the `pwn` subcommand in a directory with the relevant files. It automatically detects the binary, libc, and linker.
 
 ```sh
-pwninit
+pwninit pwn
 ```
+
+Bare `pwninit` remains supported for compatibility and performs the same pwn workflow.
 
 If the automatic detection is incorrect, you can manually specify the file paths:
 
 ```sh
-pwninit --bin ./challenge_bin --libc ./libc.so.6 --ld ./ld-linux.so.2
+pwninit pwn --bin ./challenge_bin --libc ./libc.so.6 --ld ./ld-linux.so.2
 ```
+
+The command fails before changing files when no binary is found. If multiple candidate binaries, libcs, or linkers are present, specify the intended path explicitly instead of relying on directory order.
 
 ### Reverse Engineering Challenges
 
@@ -98,15 +103,47 @@ pwninit rev --bin ./challenge_bin
 
 ### Fetching Additional Libraries
 
-You can fetch extra libraries from a specific libc package using the `fetch-libc` subcommand.
+The `fetch-libc` subcommand supports Launchpad, Docker, and Debian sources. Launchpad is the default:
 
 ```sh
-pwninit fetch-libc <version> --lib <name>
+pwninit fetch-libc 2.31 --lib libm.so.6
 ```
 
-- This option is repeatable.
-- It accepts sonames such as `libm.so.6`, `libdl.so.2`, or `libnss_dns.so.2`.
-- It also supports aliases like `libm` and `libpthread` (mapping to `libm.so.6` and `libpthread.so.0`).
+Use Docker by supplying an image or a distro/release pair:
+
+```sh
+pwninit fetch-libc --source docker --image ubuntu:22.04
+pwninit fetch-libc --source docker --distro debian --release bookworm
+```
+
+Use a Debian repository by supplying both a version prefix and release:
+
+```sh
+pwninit fetch-libc 2.36 --source debian --release bookworm
+```
+
+When multiple package versions match, the Launchpad and Debian sources prompt for a selection. For scripts, disable prompts and optionally select the complete package version:
+
+```sh
+pwninit fetch-libc 2.31 --non-interactive
+pwninit fetch-libc 2.31 --exact-version 2.31-0ubuntu9.18
+```
+
+An ambiguous `--non-interactive` lookup fails and lists the available versions. EOF during an interactive selection also produces an error instead of retrying indefinitely.
+
+`--lib` is repeatable and accepts sonames such as `libm.so.6`, `libdl.so.2`, or `libnss_dns.so.2`. Aliases such as `libm` and `libpthread` are normalized automatically. Use `--from-bin` to inspect one binary and fetch its missing glibc package dependencies explicitly:
+
+```sh
+pwninit fetch-libc 2.31 --from-bin ./challenge
+```
+
+Place every downloaded artifact in one directory with `--output-dir`. Use `--libc-output` to change the libc path relative to that directory:
+
+```sh
+pwninit fetch-libc 2.31 --output-dir ./runtime --libc-output libc-custom.so.6
+```
+
+The previous `--output` option remains an alias for `--libc-output`.
 
 ## Advanced Configuration
 
@@ -115,32 +152,43 @@ pwninit fetch-libc <version> --lib <name>
 You can instruct `pwninit` to automatically create a local `uv` virtual environment in `.venv` and install required packages (`pwntools` for pwn, `angr` + `z3-solver` for rev).
 
 ```sh
-pwninit --uv
+pwninit pwn --uv
 ```
 
 By default, no virtual environment is created.
 
 ### Patching Modes
 
-By default, binary patching relies on [`patchelf`](https://github.com/NixOS/patchelf) to set the `RPATH` to `.` and the interpreter to `./ld`.
-
-You can opt for a manual patching mode that directly rewrites `PT_INTERP` and `DT_NEEDED` entries in place to short local names (e.g. `./ld`, `./libc`).
+Select the patching strategy with `--patch-mode`:
 
 ```sh
-pwninit --no-patchelf
+pwninit pwn --patch-mode patchelf
+pwninit pwn --patch-mode manual
+pwninit pwn --patch-mode none
 ```
 
-*Note:* Both modes create the necessary symlinks (`ld`, `libc`, etc.) in the challenge directory. The `--no-patchelf` flag only applies replacements that fit within the original ELF string slot; oversized or unresolved entries are skipped with a warning.
+The default `patchelf` mode sets the `RPATH` to `.` whenever local shared libraries are present and sets the interpreter to `./ld`. Manual mode rewrites each matching `DT_NEEDED` entry to a short local alias such as `./libm` and rewrites `PT_INTERP` to `./ld`. This applies to downloaded companions such as `libm.so.6`, `libpthread.so.0`, and `libnss_*.so.2`, not only libc.
+
+Both active modes create the necessary symlinks. Manual replacements must fit within the original ELF string slot; oversized or unresolved entries are skipped with a warning. The deprecated `--no-patchelf` and `--no-patch-bin` options remain available as compatibility aliases.
 
 ### Custom Templates
 
 If you prefer a different `solve.py` boilerplate, you can provide a custom template path. The names of the `exe`, `libc`, and `ld` bindings can also be customized.
 
 ```sh
-pwninit --template-path <path> \
+pwninit pwn --template-path <path> \
         --template-bin-name exe \
         --template-libc-name libc \
         --template-ld-name ld
+```
+
+Binding names must be valid, distinct Python identifiers and cannot be Python keywords.
+
+By default, the solve script is written to `solve.py`. Existing files are preserved and reported as skipped:
+
+```sh
+pwninit pwn --solve-path scripts/solve.py
+pwninit pwn --solve-path scripts/solve.py --force
 ```
 
 For the exact template format and available variables, refer to [`src/template.py`](src/template.py).
@@ -150,5 +198,23 @@ For the exact template format and available variables, refer to [`src/template.p
 To automatically load your custom template on every run, you can add an alias to your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`).
 
 ```bash
-alias pwninit='pwninit --template-path ~/.config/pwninit-template.py --template-bin-name e'
+alias pwninit-pwn='pwninit pwn --template-path ~/.config/pwninit-template.py --template-bin-name e'
 ```
+
+### Output and Automation
+
+Every workflow prints a final completed, skipped, and failed step summary. Required step failures return a nonzero exit status. `--best-effort` continues independent steps after a failure but still returns a failure status when a required step did not complete.
+
+```sh
+pwninit pwn --best-effort
+```
+
+Use `--quiet` for a count-only summary, `--verbose` for additional diagnostics, or `--json` for one machine-readable result on stdout:
+
+```sh
+pwninit pwn --quiet
+pwninit pwn --verbose
+pwninit pwn --json
+```
+
+JSON package fetching requires `--non-interactive` or `--exact-version`. The installed version is available through `pwninit --version`.

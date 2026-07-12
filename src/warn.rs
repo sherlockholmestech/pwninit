@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use colored::Colorize;
+use crate::output;
 
 pub trait Warn {
     fn warn(self, msg: &str);
@@ -20,6 +20,6 @@ impl<T, E: Warn> WarnResult for Result<T, E> {
 
 impl<T: Display> Warn for T {
     fn warn(self, msg: &str) {
-        eprintln!("{}", format!("warning: {}: {}", msg, self).magenta().bold())
+        output::warning(format!("{}: {}", msg, self))
     }
 }

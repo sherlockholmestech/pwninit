@@ -4,6 +4,7 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
+use crate::output;
 use colored::Colorize;
 use snafu::ResultExt;
 use snafu::Snafu;
@@ -20,7 +21,15 @@ pub enum Error {
 pub type Result<T = ()> = std::result::Result<T, Error>;
 
 fn run_uv(args: &[&str]) -> Result<()> {
-    let status = Command::new("uv").args(args).status().context(ExecSnafu)?;
+    output::verbose(format!("running: uv {}", args.join(" ")));
+    let mut command = Command::new("uv");
+    command.args(args);
+    if output::is_json() {
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
+    let status = command.status().context(ExecSnafu)?;
     if status.success() {
         Ok(())
     } else {
@@ -33,11 +42,11 @@ fn run_uv(args: &[&str]) -> Result<()> {
 pub fn ensure_uv_venv(packages: &[&str]) -> Result {
     let venv_path = Path::new(".venv");
     if !venv_path.exists() {
-        println!("{}", "creating uv virtual environment".cyan().bold());
+        output::progress("creating uv virtual environment".cyan().bold());
         run_uv(&["venv", ".venv"])?;
     }
 
-    println!("{}", "installing packages with uv".cyan().bold());
+    output::progress("installing packages with uv".cyan().bold());
     let mut args = vec!["pip", "install", "--python", ".venv/bin/python"];
     args.extend_from_slice(packages);
     run_uv(&args)

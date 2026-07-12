@@ -2,6 +2,7 @@ use crate::cpu_arch::CpuArch;
 use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
 use crate::libc_deb;
 use crate::libc_version::LibcVersion;
+use crate::output;
 
 use std::path::Path;
 
@@ -67,7 +68,7 @@ pub(crate) fn fetch_ld_to_with(
 
 /// Download linker compatible with libc version `ver`, saved as `ld-{short}.so`
 pub fn fetch_ld(ver: &LibcVersion) -> Result {
-    println!("{}", "fetching linker".green().bold());
+    output::progress("fetching linker".green().bold());
     fetch_ld_to(ver, format!("ld-{}.so", ver.string_short))
 }
 
@@ -75,7 +76,7 @@ pub fn fetch_ld(ver: &LibcVersion) -> Result {
 /// (`ld-linux-x86-64.so.2` or `ld-linux.so.2`).
 #[allow(dead_code)]
 pub fn fetch_ld_canonical(ver: &LibcVersion) -> Result {
-    println!("{}", "fetching linker".green().bold());
+    output::progress("fetching linker".green().bold());
     fetch_ld_to(ver, canonical_ld_name(&ver.arch))
 }
 
