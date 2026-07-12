@@ -147,6 +147,22 @@ fn maybe_fetch_needed_libs(opts: &PwnOpts, ver: &LibcVersion) {
     }
 }
 
+fn maybe_unstrip_libc<F>(
+    opts: &PwnOpts,
+    libc: &Path,
+    ver: &LibcVersion,
+    unstrip: F,
+) -> unstrip_libc::Result
+where
+    F: FnOnce(&Path, &LibcVersion) -> unstrip_libc::Result,
+{
+    if opts.no_unstrip {
+        Ok(())
+    } else {
+        unstrip(libc, ver)
+    }
+}
+
 fn detect_libc_family(libc: &Path) -> LibcFamily {
     let file_name = libc
         .file_name()
@@ -193,7 +209,7 @@ fn visit_libc(opts: &PwnOpts, libc: &Path) {
     };
     maybe_fetch_ld(opts, &ver, fetch_ld).warn("failed fetching ld");
     maybe_fetch_needed_libs(opts, &ver);
-    unstrip_libc(libc, &ver).warn("failed unstripping libc");
+    maybe_unstrip_libc(opts, libc, &ver, unstrip_libc).warn("failed unstripping libc");
 }
 
 /// Same as `visit_libc()`, but doesn't do anything if no libc is found
@@ -334,6 +350,45 @@ mod tests {
             }) => {}
             other => panic!("expected wrapped FileNotFound error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn maybe_unstrip_libc_skips_when_disabled() {
+        let opts = PwnOpts {
+            no_unstrip: true,
+            ..PwnOpts::default()
+        };
+        let called = Cell::new(false);
+        let libc = Path::new("libc.so.6");
+
+        let result = maybe_unstrip_libc(&opts, libc, &new_version("2.34"), |_, _| {
+            called.set(true);
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn maybe_unstrip_libc_runs_by_default() {
+        let called = Cell::new(false);
+        let libc = Path::new("libc.so.6");
+
+        let result = maybe_unstrip_libc(
+            &PwnOpts::default(),
+            libc,
+            &new_version("2.34"),
+            |path, ver| {
+                assert_eq!(path, libc);
+                assert_eq!(ver.string_short, "2.34");
+                called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(called.get());
     }
 
     #[test]

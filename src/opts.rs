@@ -155,6 +155,10 @@ pub struct PwnOpts {
     /// Skip generating the solve script template
     #[arg(long)]
     pub no_template: bool,
+
+    /// Skip downloading debug symbols and unstripping libc
+    #[arg(long)]
+    pub no_unstrip: bool,
 }
 
 /// Options for rev challenge initialization
@@ -237,6 +241,7 @@ impl Default for PwnOpts {
             no_patch_bin: false,
             no_patchelf: false,
             no_template: false,
+            no_unstrip: false,
         }
     }
 }
@@ -380,6 +385,21 @@ mod tests {
     #[test]
     fn pwn_flow_does_not_accept_extra_libs() {
         assert!(Opts::try_parse_from(["pwninit", "--lib", "libm.so.6"]).is_err());
+    }
+
+    #[test]
+    fn pwn_no_unstrip_flag_parses() {
+        let opts =
+            Opts::try_parse_from(["pwninit", "--no-unstrip"]).expect("--no-unstrip should parse");
+
+        assert!(opts.pwn.no_unstrip);
+    }
+
+    #[test]
+    fn pwn_unstrip_is_enabled_by_default() {
+        let opts = Opts::try_parse_from(["pwninit"]).expect("default pwn flow should parse");
+
+        assert!(!opts.pwn.no_unstrip);
     }
 
     // -------------------------------------------------------------------
