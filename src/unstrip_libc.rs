@@ -1,10 +1,12 @@
 use crate::debian_libc;
 use crate::elf;
 use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
+use crate::is_glibc_runtime_shared_object;
 use crate::libc_deb;
 use crate::libc_version::LibcVersion;
 use crate::output;
 
+use std::collections::HashSet;
 use std::io::copy;
 use std::io::stderr;
 use std::io::stdout;
@@ -51,6 +53,12 @@ pub enum Error {
 
     #[snafu(display("failed writing symbols to libc file: {}", source))]
     LibcWrite { source: std::io::Error },
+
+    #[snafu(display("failed scanning for related libc shared objects: {}", source))]
+    ScanLibraries { source: std::io::Error },
+
+    #[snafu(display("failed unstripping one or more libc shared objects: {}", errors))]
+    SharedObjectsFailed { errors: String },
 }
 
 pub type Result<T = ()> = std::result::Result<T, Error>;
@@ -96,7 +104,11 @@ fn do_unstrip_libc_with_sources(
     sources: Vec<DebugSymbolSource>,
     policy: RetryPolicy,
 ) -> Result {
-    output::progress("unstripping libc".yellow().bold());
+    output::progress(
+        format!("unstripping {}", libc.to_string_lossy())
+            .yellow()
+            .bold(),
+    );
 
     let tmp_dir = TempDir::new().context(TmpDirSnafu)?;
 
@@ -242,6 +254,89 @@ pub fn unstrip_libc(libc: &Path, ver: &LibcVersion) -> Result {
     Ok(())
 }
 
+/// Find glibc runtime shared objects next to the selected libc.
+///
+/// The selected libc is always first. Symlink aliases and hard links are
+/// deduplicated by their canonical path so the same file is not rewritten
+/// more than once.
+fn related_libc_shared_objects(libc: &Path) -> Result<Vec<PathBuf>> {
+    let parent = libc
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut paths = std::fs::read_dir(parent)
+        .context(ScanLibrariesSnafu)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context(ScanLibrariesSnafu)?;
+    paths.sort();
+
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    let libc_identity = std::fs::canonicalize(libc).unwrap_or_else(|_| libc.to_path_buf());
+    seen.insert(libc_identity);
+    targets.push(libc.to_path_buf());
+
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_glibc_runtime_shared_object(name) {
+            continue;
+        }
+        if !matches!(elf::detect::is_elf(&path), Ok(true)) {
+            continue;
+        }
+
+        let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen.insert(identity) {
+            targets.push(path);
+        }
+    }
+
+    Ok(targets)
+}
+
+/// Unstrip the selected libc and every related glibc runtime shared object in
+/// the same challenge directory. Failures are collected after all candidates
+/// have been attempted, so one missing debug entry does not prevent the other
+/// libraries from being processed.
+pub fn unstrip_libc_shared_objects(libc: &Path, ver: &LibcVersion) -> Result {
+    let targets = related_libc_shared_objects(libc)?;
+    let mut sources = None;
+    unstrip_each_shared_object(targets, |target| {
+        match elf::has_debug_syms(target).context(ElfParseSnafu) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let sources = sources.get_or_insert_with(|| debug_symbol_sources(ver));
+                do_unstrip_libc_with_sources(target, ver, sources.clone(), RetryPolicy::default())
+            }
+            Err(err) => Err(err),
+        }
+    })
+}
+
+fn unstrip_each_shared_object<F>(targets: Vec<PathBuf>, mut unstrip: F) -> Result
+where
+    F: FnMut(&Path) -> Result,
+{
+    let mut errors = Vec::new();
+    for target in targets {
+        let result = unstrip(&target);
+        if let Err(err) = result {
+            errors.push(format!("{}: {}", target.display(), err));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::SharedObjectsFailed {
+            errors: errors.join("; "),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +353,93 @@ mod tests {
     use flate2::Compression;
 
     use crate::cpu_arch::CpuArch;
+
+    fn copy_elf(to: &Path) {
+        std::fs::copy(std::env::current_exe().expect("current executable"), to)
+            .expect("copy ELF fixture");
+    }
+
+    #[test]
+    fn related_shared_objects_include_glibc_libraries_but_not_unrelated_elfs() {
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let libc = tmp.path().join("libc.so.6");
+        copy_elf(&libc);
+        for name in [
+            "libm.so.6",
+            "libpthread-2.31.so",
+            "libnss_dns.so.2",
+            "libmvec.so.1",
+        ] {
+            copy_elf(&tmp.path().join(name));
+        }
+        for name in ["libcrypto.so.3", "libstdc++.so.6", "ld-linux-x86-64.so.2"] {
+            copy_elf(&tmp.path().join(name));
+        }
+        std::fs::write(tmp.path().join("librt.so.1"), b"not an ELF").expect("write non-ELF decoy");
+
+        let targets = related_libc_shared_objects(&libc).expect("discover related libraries");
+        let names: Vec<_> = targets
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(names[0], "libc.so.6");
+        assert_eq!(
+            names[1..],
+            [
+                "libm.so.6",
+                "libmvec.so.1",
+                "libnss_dns.so.2",
+                "libpthread-2.31.so",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn related_shared_objects_deduplicate_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let versioned = tmp.path().join("libc-2.31.so");
+        copy_elf(&versioned);
+        let libc = tmp.path().join("libc.so.6");
+        symlink("libc-2.31.so", &libc).expect("create libc symlink");
+
+        let targets = related_libc_shared_objects(&libc).expect("discover related libraries");
+        assert_eq!(targets, [libc]);
+    }
+
+    #[test]
+    fn unstrip_attempts_every_shared_object_after_an_earlier_failure() {
+        let targets = vec![
+            PathBuf::from("libc.so.6"),
+            PathBuf::from("libm.so.6"),
+            PathBuf::from("libpthread.so.0"),
+        ];
+        let mut attempted = Vec::new();
+
+        let result = unstrip_each_shared_object(targets, |path| {
+            attempted.push(path.to_path_buf());
+            if path == Path::new("libc.so.6") {
+                Err(Error::DebugSourcesFailed {
+                    errors: "fixture failure".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(matches!(result, Err(Error::SharedObjectsFailed { .. })));
+        assert_eq!(
+            attempted,
+            [
+                PathBuf::from("libc.so.6"),
+                PathBuf::from("libm.so.6"),
+                PathBuf::from("libpthread.so.0"),
+            ]
+        );
+    }
 
     /// [`Sleeper`] that records scheduled delays without blocking.
     #[derive(Default)]

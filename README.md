@@ -61,7 +61,7 @@ hunter	hunter_patched	ld-2.23.so  libc.so.6  readme  solve.py
 
 - Automatically sets challenge binaries as executable.
 - Downloads a matching linker (`ld-linux.so.*`) to segfaultlessly load the provided libc.
-- Fetches debug symbols and unstrips the libc automatically.
+- Fetches debug symbols and unstrips libc plus related glibc shared libraries in the challenge directory automatically.
 - Patches binaries using `patchelf` (or natively) to set the correct `RPATH` and `PT_INTERP`.
 - Downloads additional libraries from the same libc package on demand.
 - Generates template solve scripts for both `pwntools` and `angr` / `z3`.

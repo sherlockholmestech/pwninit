@@ -115,6 +115,40 @@ fn glibc_package_soname(name: &str) -> bool {
     ) || (name.starts_with("libnss_") && name.ends_with(".so.2"))
 }
 
+/// Return whether `name` is a shared object shipped as part of glibc's
+/// runtime package. This accepts both canonical sonames (`libm.so.6`) and
+/// the versioned filenames used by older releases (`libm-2.31.so`).
+pub(crate) fn is_glibc_runtime_shared_object(name: &str) -> bool {
+    const STEMS: &[&str] = &[
+        "libc",
+        "libm",
+        "libmvec",
+        "libpthread",
+        "libdl",
+        "librt",
+        "libutil",
+        "libresolv",
+        "libanl",
+        "libBrokenLocale",
+        "libnsl",
+        "libcrypt",
+        "libthread_db",
+        "libmemusage",
+        "libpcprofile",
+        "libSegFault",
+    ];
+
+    if name.starts_with("libnss_") && name.contains(".so") {
+        return true;
+    }
+
+    STEMS.iter().any(|stem| {
+        name.strip_prefix(stem).is_some_and(|suffix| {
+            suffix.starts_with(".so") || (suffix.starts_with('-') && suffix.contains(".so"))
+        })
+    })
+}
+
 fn missing_glibc_package_libraries(libs: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut needed = Vec::new();
     for lib in libs {
@@ -228,7 +262,8 @@ fn visit_libc(opts: &PwnOpts, libc: &Path) -> Vec<String> {
         failures.push(message);
     }
     failures.extend(maybe_fetch_needed_libs(opts, &ver));
-    maybe_unstrip_libc(opts, libc, &ver, unstrip_libc).warn("failed unstripping libc");
+    maybe_unstrip_libc(opts, libc, &ver, unstrip_libc::unstrip_libc_shared_objects)
+        .warn("failed unstripping libc shared objects");
     failures
 }
 
@@ -431,6 +466,32 @@ mod tests {
         );
 
         assert_eq!(libs, ["libpthread.so.0", "libnss_dns.so.2"]);
+    }
+
+    #[test]
+    fn glibc_runtime_shared_objects_accept_sonames_and_versioned_names() {
+        for name in [
+            "libc.so.6",
+            "libc-2.31.so",
+            "libm.so.6",
+            "libm-2.31.so",
+            "libmvec.so.1",
+            "libpthread.so.0",
+            "libnss_dns.so.2",
+            "libSegFault.so",
+        ] {
+            assert!(
+                is_glibc_runtime_shared_object(name),
+                "expected {name} to be recognized as a glibc runtime library"
+            );
+        }
+
+        for name in ["ld-linux-x86-64.so.2", "libcrypto.so.3", "libstdc++.so.6"] {
+            assert!(
+                !is_glibc_runtime_shared_object(name),
+                "did not expect {name} to be treated as a glibc runtime library"
+            );
+        }
     }
 
     #[test]
