@@ -1,4 +1,5 @@
 use crate::cpu_arch::CpuArch;
+use crate::debian_libc;
 use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
 use crate::libc_deb;
 use crate::libc_version::LibcVersion;
@@ -14,6 +15,12 @@ use snafu::Snafu;
 pub enum Error {
     #[snafu(display("libc deb error: {}", source))]
     Deb { source: libc_deb::Error },
+
+    #[snafu(display("Debian libc search error: {}", source))]
+    Debian { source: debian_libc::Error },
+
+    #[snafu(display("no Debian libc6 package found for version {} ({})", version, arch))]
+    DebianPackageNotFound { version: String, arch: CpuArch },
 }
 
 pub type Result<T = ()> = std::result::Result<T, Error>;
@@ -34,13 +41,43 @@ pub(crate) fn canonical_ld_name(arch: &CpuArch) -> &'static str {
 }
 
 fn fetch_ld_to(ver: &LibcVersion, out_name: impl AsRef<Path>) -> Result {
-    fetch_ld_to_with(
-        ver,
-        out_name,
-        libc_deb::PKG_URL,
-        RetryPolicy::default(),
-        &mut StdSleeper,
+    if ver.string.contains("ubuntu") {
+        return fetch_ld_to_with(
+            ver,
+            out_name,
+            libc_deb::PKG_URL,
+            RetryPolicy::default(),
+            &mut StdSleeper,
+        );
+    }
+
+    let policy = RetryPolicy::default();
+    let mut sleeper = StdSleeper;
+    let package = debian_libc::search_snapshot_binary(
+        "libc6",
+        &ver.string,
+        ver.arch,
+        debian_libc::DEBIAN_SNAPSHOT_URL,
+        policy,
+        &mut sleeper,
     )
+    .context(DebianSnafu)?;
+    let Some(package) = package else {
+        return Err(Error::DebianPackageNotFound {
+            version: ver.string.clone(),
+            arch: ver.arch,
+        });
+    };
+
+    let ld_name = ld_name_in_deb(ver);
+    libc_deb::write_deb_url_file_with(
+        &package.deb_url,
+        &[&ld_name],
+        out_name,
+        policy,
+        &mut sleeper,
+    )
+    .context(DebSnafu)
 }
 
 /// Same as [`fetch_ld_to`] but lets callers inject the base URL, retry

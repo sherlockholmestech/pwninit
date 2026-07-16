@@ -95,13 +95,36 @@ pub fn fetch_libc(ver: &LibcVersion, out_path: &Path) -> Result {
 }
 
 fn fetch_libc_package_file(ver: &LibcVersion, soname: &str, out_path: &Path) -> Result {
-    fetch_libc_package_file_with(
+    if ver.string.contains("ubuntu") {
+        return fetch_libc_package_file_with(
+            ver,
+            soname,
+            out_path,
+            libc_deb::PKG_URL,
+            RetryPolicy::default(),
+            &mut StdSleeper,
+        );
+    }
+
+    let policy = RetryPolicy::default();
+    let mut sleeper = StdSleeper;
+    let package = debian_libc::search_snapshot_binary(
+        "libc6",
+        &ver.string,
+        ver.arch,
+        debian_libc::DEBIAN_SNAPSHOT_URL,
+        policy,
+        &mut sleeper,
+    )
+    .context(DebianSnafu)?
+    .ok_or(Error::NoVersionsFound)?;
+    fetch_libc_package_file_from_url_with(
         ver,
         soname,
         out_path,
-        libc_deb::PKG_URL,
-        RetryPolicy::default(),
-        &mut StdSleeper,
+        &package.deb_url,
+        policy,
+        &mut sleeper,
     )
 }
 
@@ -185,13 +208,21 @@ fn validate_extra_lib_name(lib_name: &str) -> Result {
 
 /// Download a library from the same libc6 package as `ver`.
 pub fn fetch_libc_lib(ver: &LibcVersion, lib_name: &str) -> Result {
-    fetch_libc_lib_with(
-        ver,
-        lib_name,
-        libc_deb::PKG_URL,
-        RetryPolicy::default(),
-        &mut StdSleeper,
-    )
+    if ver.string.contains("ubuntu") {
+        return fetch_libc_lib_with(
+            ver,
+            lib_name,
+            libc_deb::PKG_URL,
+            RetryPolicy::default(),
+            &mut StdSleeper,
+        );
+    }
+
+    validate_extra_lib_name(lib_name)?;
+    let soname = normalize_extra_lib_name(lib_name);
+
+    output::progress(format!("fetching {}", soname).yellow().bold());
+    fetch_libc_package_file(ver, soname, Path::new(soname))
 }
 
 /// Same as [`fetch_libc_lib`] but lets callers inject the base URL, retry
@@ -378,9 +409,34 @@ pub(crate) fn fetch_libc_from_debian_selected_with(
         .bold()
     )
     .ok();
-    let packages =
+    let exact_snapshot_package =
+        match snapshot_exact_version(short_version, exact_version, repo_url) {
+            Some(exact) => match debian_libc::search_snapshot_binary(
+                "libc6",
+                exact,
+                arch,
+                debian_libc::DEBIAN_SNAPSHOT_URL,
+                policy,
+                sleeper,
+            ) {
+                Ok(package) => package,
+                Err(err) => {
+                    output::warning(format!(
+                        "failed searching Debian Snapshot for libc6: {}; trying live mirror",
+                        err
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+
+    let packages = if let Some(package) = exact_snapshot_package {
+        vec![package]
+    } else {
         debian_libc::search_versions_with(short_version, arch, release, repo_url, policy, sleeper)
-            .context(DebianSnafu)?;
+            .context(DebianSnafu)?
+    };
 
     if packages.is_empty() {
         return Err(Error::NoVersionsFound);
@@ -423,6 +479,17 @@ pub(crate) fn fetch_libc_from_debian_selected_with(
     }
 
     Ok(())
+}
+
+fn snapshot_exact_version<'a>(
+    short_version: &str,
+    exact_version: Option<&'a str>,
+    repo_url: &str,
+) -> Option<&'a str> {
+    exact_version.filter(|exact| {
+        repo_url.trim_end_matches('/') == debian_libc::DEBIAN_REPO_URL
+            && (*exact == short_version || exact.starts_with(&format!("{}-", short_version)))
+    })
 }
 
 /// Search for available libc6 versions matching `short_version`, prompt the
@@ -672,6 +739,34 @@ mod tests {
         let choice = select_version(&versions, true, Some("2.31-2"), &mut input, &mut output)
             .expect("exact version should be selected");
         assert_eq!(choice, 1);
+    }
+
+    #[test]
+    fn default_debian_exact_version_uses_snapshot() {
+        assert_eq!(
+            snapshot_exact_version(
+                "2.36",
+                Some("2.36-9+deb12u13"),
+                debian_libc::DEBIAN_REPO_URL,
+            ),
+            Some("2.36-9+deb12u13")
+        );
+        assert_eq!(
+            snapshot_exact_version(
+                "2.36",
+                Some("2.36-9+deb12u13"),
+                "https://mirror.example/debian",
+            ),
+            None
+        );
+        assert_eq!(
+            snapshot_exact_version(
+                "2.31",
+                Some("2.36-9+deb12u13"),
+                debian_libc::DEBIAN_REPO_URL,
+            ),
+            None
+        );
     }
 
     use flate2::write::GzEncoder;

@@ -145,10 +145,41 @@ fn do_unstrip_libc_with_sources(
 
 fn debug_symbol_sources(ver: &LibcVersion) -> Vec<DebugSymbolSource> {
     let deb_file_name = debug_deb_file_name(ver);
-    let mut sources = vec![DebugSymbolSource {
-        name: "launchpad".to_string(),
-        url: format!("{}/{}", libc_deb::PKG_URL, deb_file_name),
-    }];
+    if ver.string.contains("ubuntu") {
+        return vec![DebugSymbolSource {
+            name: "launchpad".to_string(),
+            url: format!("{}/{}", libc_deb::PKG_URL, deb_file_name),
+        }];
+    }
+
+    let mut sources = Vec::new();
+
+    let mut sleeper = StdSleeper;
+    match debian_libc::search_snapshot_binary(
+        "libc6-dbg",
+        &ver.string,
+        ver.arch,
+        debian_libc::DEBIAN_SNAPSHOT_URL,
+        RetryPolicy::default(),
+        &mut sleeper,
+    ) {
+        Ok(Some(package)) => sources.push(DebugSymbolSource {
+            name: "debian-snapshot".to_string(),
+            url: package.deb_url,
+        }),
+        Ok(None) => output::warning(format!(
+            "failed finding libc6-dbg {} in Debian Snapshot; trying live mirrors",
+            ver.string
+        )),
+        Err(err) => output::warning(format!(
+            "failed searching Debian Snapshot for libc6-dbg: {}; trying live mirrors",
+            err
+        )),
+    }
+
+    if !sources.is_empty() {
+        return sources;
+    }
 
     for release in ["stable", "testing", "unstable"] {
         let mut sleeper = StdSleeper;
@@ -171,18 +202,6 @@ fn debug_symbol_sources(ver: &LibcVersion) -> Vec<DebugSymbolSource> {
                 release, err
             )),
         }
-    }
-
-    let debian_pool_url = format!(
-        "{}/pool/main/g/glibc/{}",
-        debian_libc::DEBIAN_REPO_URL,
-        deb_file_name
-    );
-    if !sources.iter().any(|source| source.url == debian_pool_url) {
-        sources.push(DebugSymbolSource {
-            name: "debian-pool".to_string(),
-            url: debian_pool_url,
-        });
     }
 
     sources

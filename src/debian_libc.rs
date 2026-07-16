@@ -4,12 +4,14 @@ use crate::cpu_arch::CpuArch;
 use crate::http_retry::{self, RetryPolicy, Sleeper, StdSleeper};
 
 use flate2::read::GzDecoder;
+use serde::Deserialize;
 use snafu::ResultExt;
 use snafu::Snafu;
 use std::collections::BTreeMap;
 use std::io::Read;
 
 pub(crate) const DEBIAN_REPO_URL: &str = "https://deb.debian.org/debian";
+pub(crate) const DEBIAN_SNAPSHOT_URL: &str = "https://snapshot.debian.org";
 const GLIBC_POOL_PATH: &str = "pool/main/g/glibc";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +30,77 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Deserialize)]
+struct SnapshotBinaryFiles {
+    result: Vec<SnapshotBinaryFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotBinaryFile {
+    architecture: String,
+    hash: String,
+}
+
+/// Find an exact binary package in Debian Snapshot.
+///
+/// Debian's live mirrors remove superseded package revisions, which makes a
+/// directly constructed pool URL unreliable for challenge-provided libcs.
+/// Snapshot's binary-file API resolves the exact version and architecture to
+/// an immutable, content-addressed download URL instead.
+pub(crate) fn search_snapshot_binary(
+    package_name: &str,
+    version: &str,
+    arch: CpuArch,
+    snapshot_url: &str,
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+) -> Result<Option<DebianLibcPackage>> {
+    let snapshot_url = snapshot_url.trim_end_matches('/');
+    let api_url = format!(
+        "{}/mr/binary/{}/{}/binfiles",
+        snapshot_url,
+        percent_encode_path_segment(package_name),
+        percent_encode_path_segment(version),
+    );
+    let (response, _trace): (SnapshotBinaryFiles, _) =
+        http_retry::get_json(&api_url, policy, sleeper)
+            .map_err(|source| Error::Request { source })?;
+    Ok(snapshot_binary_package(
+        response,
+        package_name,
+        version,
+        arch,
+        snapshot_url,
+    ))
+}
+
+fn snapshot_binary_package(
+    response: SnapshotBinaryFiles,
+    package_name: &str,
+    version: &str,
+    arch: CpuArch,
+    snapshot_url: &str,
+) -> Option<DebianLibcPackage> {
+    let Some(file) = response
+        .result
+        .into_iter()
+        .find(|file| file.architecture == arch.to_string())
+    else {
+        return None;
+    };
+
+    let file_name = format!("{}_{}_{}.deb", package_name, version, arch);
+    Some(DebianLibcPackage {
+        version: version.to_string(),
+        deb_url: format!(
+            "{}/file/{}/{}",
+            snapshot_url,
+            file.hash,
+            percent_encode_path_segment(&file_name),
+        ),
+    })
+}
 
 #[allow(dead_code)]
 pub(crate) fn search_versions(
@@ -331,6 +404,19 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&output).into_owned()
 }
 
+fn percent_encode_path_segment(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{:02X}", byte).expect("writing to a String cannot fail");
+        }
+    }
+    encoded
+}
+
 #[allow(dead_code)]
 fn parse_exact_package_index(
     packages: &str,
@@ -451,6 +537,45 @@ Filename: pool/main/g/glibc/libc6-dbg_2.37-1_amd64.deb
         assert_eq!(
             package.deb_url,
             "https://deb.debian.org/debian/pool/main/g/glibc/libc6-dbg_2.36-9+deb12u14_amd64.deb"
+        );
+    }
+
+    #[test]
+    fn snapshot_path_segments_encode_debian_version_characters() {
+        assert_eq!(
+            percent_encode_path_segment("2.36-9+deb12u13"),
+            "2.36-9%2Bdeb12u13"
+        );
+    }
+
+    #[test]
+    fn snapshot_binary_response_builds_content_addressed_url_for_arch() {
+        let response = SnapshotBinaryFiles {
+            result: vec![
+                SnapshotBinaryFile {
+                    architecture: "i386".to_string(),
+                    hash: "wrong-arch".to_string(),
+                },
+                SnapshotBinaryFile {
+                    architecture: "amd64".to_string(),
+                    hash: "478d1ca58a699b7f3139dc22cb75151e0cd69a97".to_string(),
+                },
+            ],
+        };
+
+        let package = snapshot_binary_package(
+            response,
+            "libc6-dbg",
+            "2.36-9+deb12u13",
+            CpuArch::Amd64,
+            DEBIAN_SNAPSHOT_URL,
+        )
+        .expect("amd64 package");
+
+        assert_eq!(package.version, "2.36-9+deb12u13");
+        assert_eq!(
+            package.deb_url,
+            "https://snapshot.debian.org/file/478d1ca58a699b7f3139dc22cb75151e0cd69a97/libc6-dbg_2.36-9%2Bdeb12u13_amd64.deb"
         );
     }
 }
