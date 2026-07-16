@@ -1,6 +1,6 @@
 [package]
 name = "pwninit"
-version = "3.10.0"
+version = "3.10.1"
 authors = ["Sherlock Holmes"]
 edition = "2021"
 description = "automate starting binary exploit challenges"
