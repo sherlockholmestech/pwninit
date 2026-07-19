@@ -40,6 +40,15 @@ pub enum FetchLibcSource {
     Debian,
 }
 
+/// Repository used to locate debug symbols while initializing a pwn challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DebugSource {
+    /// Select Launchpad for Ubuntu glibc and Debian repositories otherwise.
+    Auto,
+    Launchpad,
+    Debian,
+}
+
 impl FromStr for FetchLibcSource {
     type Err = String;
 
@@ -211,6 +220,10 @@ pub struct PwnOpts {
     #[arg(long)]
     pub no_unstrip: bool,
 
+    /// Repository used to download glibc debug symbols
+    #[arg(long, value_enum, default_value = "auto")]
+    pub debug_source: DebugSource,
+
     /// Continue independent setup steps after a failure
     #[arg(long)]
     pub best_effort: bool,
@@ -333,6 +346,7 @@ impl Default for PwnOpts {
             solve_path: PathBuf::from("solve.py"),
             force: false,
             no_unstrip: false,
+            debug_source: DebugSource::Auto,
             best_effort: false,
         }
     }
@@ -538,6 +552,7 @@ impl PwnOpts {
             || self.solve_path != Path::new("solve.py")
             || self.force
             || self.no_unstrip
+            || self.debug_source != DebugSource::Auto
             || self.best_effort
     }
 
@@ -706,6 +721,36 @@ mod tests {
         let opts = Opts::try_parse_from(["pwninit"]).expect("default pwn flow should parse");
 
         assert!(!opts.pwn.no_unstrip);
+    }
+
+    #[test]
+    fn pwn_debug_source_defaults_to_auto_and_accepts_explicit_sources() {
+        let defaults = Opts::try_parse_from(["pwninit"]).expect("default pwn flow should parse");
+        assert_eq!(defaults.pwn.debug_source, DebugSource::Auto);
+
+        for (value, expected) in [
+            ("launchpad", DebugSource::Launchpad),
+            ("debian", DebugSource::Debian),
+        ] {
+            let opts = Opts::try_parse_from(["pwninit", "pwn", "--debug-source", value])
+                .expect("explicit debug source should parse");
+            let Some(Command::Pwn(pwn_opts)) = opts.cmd else {
+                panic!("expected pwn command");
+            };
+            assert_eq!(pwn_opts.debug_source, expected);
+        }
+    }
+
+    #[test]
+    fn fetch_libc_does_not_accept_debug_source() {
+        assert!(Opts::try_parse_from([
+            "pwninit",
+            "fetch-libc",
+            "2.36",
+            "--debug-source",
+            "debian",
+        ])
+        .is_err());
     }
 
     // -------------------------------------------------------------------

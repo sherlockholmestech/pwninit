@@ -4,6 +4,7 @@ use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
 use crate::is_glibc_runtime_shared_object;
 use crate::libc_deb;
 use crate::libc_version::LibcVersion;
+use crate::opts::DebugSource;
 use crate::output;
 
 use std::collections::HashSet;
@@ -76,7 +77,16 @@ struct DebugSymbolSource {
 
 /// Download debug symbols and apply them to a libc
 fn do_unstrip_libc(libc: &Path, ver: &LibcVersion) -> Result {
-    do_unstrip_libc_with_sources(libc, ver, debug_symbol_sources(ver), RetryPolicy::default())
+    do_unstrip_libc_from_source(libc, ver, DebugSource::Auto)
+}
+
+fn do_unstrip_libc_from_source(libc: &Path, ver: &LibcVersion, source: DebugSource) -> Result {
+    do_unstrip_libc_with_sources(
+        libc,
+        ver,
+        debug_symbol_sources(ver, source),
+        RetryPolicy::default(),
+    )
 }
 
 /// Same as [`do_unstrip_libc`] but lets callers inject the base URL, retry
@@ -143,9 +153,17 @@ fn do_unstrip_libc_with_sources(
     Ok(())
 }
 
-fn debug_symbol_sources(ver: &LibcVersion) -> Vec<DebugSymbolSource> {
+fn resolved_debug_source(ver: &LibcVersion, requested: DebugSource) -> DebugSource {
+    match requested {
+        DebugSource::Auto if ver.string.contains("ubuntu") => DebugSource::Launchpad,
+        DebugSource::Auto => DebugSource::Debian,
+        explicit => explicit,
+    }
+}
+
+fn debug_symbol_sources(ver: &LibcVersion, requested: DebugSource) -> Vec<DebugSymbolSource> {
     let deb_file_name = debug_deb_file_name(ver);
-    if ver.string.contains("ubuntu") {
+    if resolved_debug_source(ver, requested) == DebugSource::Launchpad {
         return vec![DebugSymbolSource {
             name: "launchpad".to_string(),
             url: format!("{}/{}", libc_deb::PKG_URL, deb_file_name),
@@ -316,18 +334,22 @@ fn related_libc_shared_objects(libc: &Path) -> Result<Vec<PathBuf>> {
     Ok(targets)
 }
 
-/// Unstrip the selected libc and every related glibc runtime shared object in
-/// the same challenge directory. Failures are collected after all candidates
-/// have been attempted, so one missing debug entry does not prevent the other
-/// libraries from being processed.
-pub fn unstrip_libc_shared_objects(libc: &Path, ver: &LibcVersion) -> Result {
+/// Unstrip libc and every related glibc shared object using the selected debug
+/// symbol repository. Failures are collected after all candidates have been
+/// attempted, so one missing debug entry does not prevent the other libraries
+/// from being processed.
+pub fn unstrip_libc_shared_objects_from_source(
+    libc: &Path,
+    ver: &LibcVersion,
+    source: DebugSource,
+) -> Result {
     let targets = related_libc_shared_objects(libc)?;
     let mut sources = None;
     unstrip_each_shared_object(targets, |target| {
         match elf::has_debug_syms(target).context(ElfParseSnafu) {
             Ok(true) => Ok(()),
             Ok(false) => {
-                let sources = sources.get_or_insert_with(|| debug_symbol_sources(ver));
+                let sources = sources.get_or_insert_with(|| debug_symbol_sources(ver, source));
                 do_unstrip_libc_with_sources(target, ver, sources.clone(), RetryPolicy::default())
             }
             Err(err) => Err(err),
@@ -372,6 +394,37 @@ mod tests {
     use flate2::Compression;
 
     use crate::cpu_arch::CpuArch;
+
+    #[test]
+    fn debug_source_auto_detects_distro_and_explicit_choice_overrides_it() {
+        let ubuntu = LibcVersion {
+            string: "2.31-0ubuntu9.16".to_string(),
+            string_short: "2.31".to_string(),
+            arch: CpuArch::Amd64,
+        };
+        let debian = LibcVersion {
+            string: "2.36-9+deb12u13".to_string(),
+            string_short: "2.36".to_string(),
+            arch: CpuArch::Amd64,
+        };
+
+        assert_eq!(
+            resolved_debug_source(&ubuntu, DebugSource::Auto),
+            DebugSource::Launchpad
+        );
+        assert_eq!(
+            resolved_debug_source(&debian, DebugSource::Auto),
+            DebugSource::Debian
+        );
+        assert_eq!(
+            resolved_debug_source(&ubuntu, DebugSource::Debian),
+            DebugSource::Debian
+        );
+        assert_eq!(
+            resolved_debug_source(&debian, DebugSource::Launchpad),
+            DebugSource::Launchpad
+        );
+    }
 
     fn copy_elf(to: &Path) {
         std::fs::copy(std::env::current_exe().expect("current executable"), to)

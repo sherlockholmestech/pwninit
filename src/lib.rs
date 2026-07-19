@@ -262,8 +262,10 @@ fn visit_libc(opts: &PwnOpts, libc: &Path) -> Vec<String> {
         failures.push(message);
     }
     failures.extend(maybe_fetch_needed_libs(opts, &ver));
-    maybe_unstrip_libc(opts, libc, &ver, unstrip_libc::unstrip_libc_shared_objects)
-        .warn("failed unstripping libc shared objects");
+    maybe_unstrip_libc(opts, libc, &ver, |libc, ver| {
+        unstrip_libc::unstrip_libc_shared_objects_from_source(libc, ver, opts.debug_source)
+    })
+    .warn("failed unstripping libc shared objects");
     failures
 }
 
