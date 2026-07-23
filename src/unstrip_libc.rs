@@ -1,6 +1,6 @@
 use crate::debian_libc;
 use crate::elf;
-use crate::http_retry::{RetryPolicy, Sleeper, StdSleeper};
+use crate::http_retry::{self, RetryPolicy, Sleeper, StdSleeper};
 use crate::is_glibc_runtime_shared_object;
 use crate::libc_deb;
 use crate::libc_version::LibcVersion;
@@ -26,6 +26,9 @@ use snafu::ResultExt;
 use snafu::Snafu;
 use tempfile::TempDir;
 
+const DEBIAN_DEBUGINFOD_URL: &str = "https://debuginfod.debian.net";
+const UBUNTU_DEBUGINFOD_URL: &str = "https://debuginfod.ubuntu.com";
+
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("libc ELF parse error: {}", source))]
@@ -34,8 +37,12 @@ pub enum Error {
     #[snafu(display("libc deb error: {}", source))]
     Deb { source: libc_deb::Error },
 
-    #[snafu(display("failed fetching debug symbols from all sources: {}", errors))]
-    DebugSourcesFailed { errors: String },
+    #[snafu(display(
+        "failed fetching debug symbols for {} from all sources: {}",
+        target,
+        errors
+    ))]
+    DebugSourcesFailed { target: String, errors: String },
 
     #[snafu(display("failed creating temporary directory"))]
     TmpDir { source: std::io::Error },
@@ -70,9 +77,31 @@ pub(crate) fn debug_deb_file_name(ver: &LibcVersion) -> String {
 }
 
 #[derive(Clone, Debug)]
-struct DebugSymbolSource {
-    name: String,
-    url: String,
+enum DebugSymbolSource {
+    DebPackage { name: String, url: String },
+    Debuginfod { name: String, base_url: String },
+}
+
+impl DebugSymbolSource {
+    fn deb_package(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self::DebPackage {
+            name: name.into(),
+            url: url.into(),
+        }
+    }
+
+    fn debuginfod(name: impl Into<String>, base_url: impl Into<String>) -> Self {
+        Self::Debuginfod {
+            name: name.into(),
+            base_url: base_url.into(),
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::DebPackage { name, .. } | Self::Debuginfod { name, .. } => name,
+        }
+    }
 }
 
 /// Download debug symbols and apply them to a libc
@@ -101,10 +130,10 @@ pub(crate) fn do_unstrip_libc_with(
     _sleeper: &mut dyn Sleeper,
 ) -> Result {
     let deb_file_name = debug_deb_file_name(ver);
-    let source = DebugSymbolSource {
-        name: "test".to_string(),
-        url: format!("{}/{}", base_url.trim_end_matches('/'), deb_file_name),
-    };
+    let source = DebugSymbolSource::deb_package(
+        "test",
+        format!("{}/{}", base_url.trim_end_matches('/'), deb_file_name),
+    );
     do_unstrip_libc_with_sources(libc, ver, vec![source], policy)
 }
 
@@ -125,13 +154,23 @@ fn do_unstrip_libc_with_sources(
     let sym_path = tmp_dir.path().join("libc-syms");
 
     let versioned_name = format!("libc-{}.so", ver.string_short);
-    let build_id_name = {
-        let build_id = elf::get_build_id(libc).context(ElfParseSnafu)?;
-        build_id.chars().skip(2).collect::<String>() + ".debug"
-    };
+    let build_id = elf::get_build_id(libc).context(ElfParseSnafu)?;
+    // Debian packages store build-ID debug files as
+    // `.build-id/<first two hex digits>/<remaining digits>.debug`, so archive
+    // matching uses the basename. Debuginfod queries require the complete ID.
+    let build_id_name = build_id.chars().skip(2).collect::<String>() + ".debug";
     let names = [versioned_name.as_str(), build_id_name.as_str()];
+    let target = format!("libc6 {} ({}, build ID {})", ver.string, ver.arch, build_id);
 
-    fetch_debug_symbols_with_sources(names.as_slice(), &sym_path, tmp_dir.path(), sources, policy)?;
+    fetch_debug_symbols_with_sources(
+        names.as_slice(),
+        &build_id,
+        &target,
+        &sym_path,
+        tmp_dir.path(),
+        sources,
+        policy,
+    )?;
 
     let out = Command::new("eu-unstrip")
         .arg(libc)
@@ -164,10 +203,13 @@ fn resolved_debug_source(ver: &LibcVersion, requested: DebugSource) -> DebugSour
 fn debug_symbol_sources(ver: &LibcVersion, requested: DebugSource) -> Vec<DebugSymbolSource> {
     let deb_file_name = debug_deb_file_name(ver);
     if resolved_debug_source(ver, requested) == DebugSource::Launchpad {
-        return vec![DebugSymbolSource {
-            name: "launchpad".to_string(),
-            url: format!("{}/{}", libc_deb::PKG_URL, deb_file_name),
-        }];
+        return vec![
+            DebugSymbolSource::deb_package(
+                "launchpad",
+                format!("{}/{}", libc_deb::PKG_URL, deb_file_name),
+            ),
+            DebugSymbolSource::debuginfod("ubuntu-debuginfod", UBUNTU_DEBUGINFOD_URL),
+        ];
     }
 
     let mut sources = Vec::new();
@@ -181,78 +223,123 @@ fn debug_symbol_sources(ver: &LibcVersion, requested: DebugSource) -> Vec<DebugS
         RetryPolicy::default(),
         &mut sleeper,
     ) {
-        Ok(Some(package)) => sources.push(DebugSymbolSource {
-            name: "debian-snapshot".to_string(),
-            url: package.deb_url,
-        }),
+        Ok(Some(package)) => sources.push(DebugSymbolSource::deb_package(
+            "debian-snapshot",
+            package.deb_url,
+        )),
         Ok(None) => output::warning(format!(
-            "failed finding libc6-dbg {} in Debian Snapshot; trying live mirrors",
-            ver.string
+            "failed finding libc6-dbg {} for {} in Debian Snapshot; trying live mirrors and debuginfod",
+            ver.string, ver.arch
         )),
         Err(err) => output::warning(format!(
-            "failed searching Debian Snapshot for libc6-dbg: {}; trying live mirrors",
-            err
+            "failed searching Debian Snapshot for libc6-dbg {} for {}: {}; trying live mirrors and debuginfod",
+            ver.string, ver.arch, err
         )),
     }
 
-    if !sources.is_empty() {
-        return sources;
-    }
-
-    for release in ["stable", "testing", "unstable"] {
-        let mut sleeper = StdSleeper;
-        match debian_libc::search_exact_package(
-            "libc6-dbg",
-            &ver.string,
-            ver.arch,
-            release,
-            debian_libc::DEBIAN_REPO_URL,
-            RetryPolicy::default(),
-            &mut sleeper,
-        ) {
-            Ok(Some(package)) => sources.push(DebugSymbolSource {
-                name: format!("debian-{}", release),
-                url: package.deb_url,
-            }),
-            Ok(None) => {}
-            Err(err) => output::warning(format!(
-                "failed searching Debian {} for libc6-dbg: {}",
-                release, err
-            )),
+    if sources.is_empty() {
+        for release in ["stable", "testing", "unstable"] {
+            let mut sleeper = StdSleeper;
+            match debian_libc::search_exact_package(
+                "libc6-dbg",
+                &ver.string,
+                ver.arch,
+                release,
+                debian_libc::DEBIAN_REPO_URL,
+                RetryPolicy::default(),
+                &mut sleeper,
+            ) {
+                Ok(Some(package)) => sources.push(DebugSymbolSource::deb_package(
+                    format!("debian-{}", release),
+                    package.deb_url,
+                )),
+                Ok(None) => {}
+                Err(err) => output::warning(format!(
+                    "failed searching Debian {} for libc6-dbg {} for {}: {}",
+                    release, ver.string, ver.arch, err
+                )),
+            }
         }
     }
 
+    // Package revisions can disappear from live mirrors and occasionally be
+    // absent from Snapshot. Debian's debuginfod indexes symbols by immutable
+    // ELF build ID, making it an independent fallback for those cases.
+    sources.push(DebugSymbolSource::debuginfod(
+        "debian-debuginfod",
+        DEBIAN_DEBUGINFOD_URL,
+    ));
     sources
+}
+
+fn write_debuginfod_file_with(
+    base_url: &str,
+    build_id: &str,
+    out_path: &Path,
+    policy: RetryPolicy,
+    sleeper: &mut dyn Sleeper,
+) -> std::result::Result<(), String> {
+    let url = format!(
+        "{}/buildid/{}/debuginfo",
+        base_url.trim_end_matches('/'),
+        build_id
+    );
+    output::progress(url.green().bold());
+    let (bytes, _) = http_retry::get_bytes(&url, policy, sleeper).map_err(|err| err.to_string())?;
+    if bytes.is_empty() {
+        return Err("debuginfod returned an empty response".to_string());
+    }
+    std::fs::write(out_path, bytes).map_err(|err| format!("failed writing debuginfo: {}", err))
 }
 
 fn fetch_debug_symbols_with_sources(
     file_names: &[&str],
+    build_id: &str,
+    target: &str,
     sym_path: &Path,
     tmp_dir: &Path,
     sources: Vec<DebugSymbolSource>,
     policy: RetryPolicy,
 ) -> Result {
+    if sources.is_empty() {
+        return Err(Error::DebugSourcesFailed {
+            target: target.to_string(),
+            errors: "no debug-symbol sources were available".to_string(),
+        });
+    }
+
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::new();
 
     for (idx, source) in sources.into_iter().enumerate() {
         let tx = tx.clone();
         let file_names: Vec<String> = file_names.iter().map(|name| (*name).to_string()).collect();
+        let build_id = build_id.to_string();
         let out_path = tmp_dir.join(format!("libc-syms-{}", idx));
         let thread_policy = policy;
         handles.push(thread::spawn(move || {
             let mut sleeper = StdSleeper;
             let names: Vec<&str> = file_names.iter().map(String::as_str).collect();
-            let result = libc_deb::write_deb_url_file_with(
-                &source.url,
-                &names,
-                &out_path,
-                thread_policy,
-                &mut sleeper,
-            )
-            .map(|()| out_path)
-            .map_err(|err| err.to_string());
-            let _ = tx.send((source.name, result));
+            let name = source.name().to_string();
+            let result = match source {
+                DebugSymbolSource::DebPackage { url, .. } => libc_deb::write_deb_url_file_with(
+                    &url,
+                    &names,
+                    &out_path,
+                    thread_policy,
+                    &mut sleeper,
+                )
+                .map_err(|err| err.to_string()),
+                DebugSymbolSource::Debuginfod { base_url, .. } => write_debuginfod_file_with(
+                    &base_url,
+                    &build_id,
+                    &out_path,
+                    thread_policy,
+                    &mut sleeper,
+                ),
+            }
+            .map(|()| out_path);
+            let _ = tx.send((name, result));
         }));
     }
     drop(tx);
@@ -273,7 +360,12 @@ fn fetch_debug_symbols_with_sources(
 
     let Some((name, path)) = winner else {
         return Err(Error::DebugSourcesFailed {
-            errors: errors.join("; "),
+            target: target.to_string(),
+            errors: if errors.is_empty() {
+                "all source workers exited without a result".to_string()
+            } else {
+                errors.join("; ")
+            },
         });
     };
 
@@ -495,6 +587,7 @@ mod tests {
             attempted.push(path.to_path_buf());
             if path == Path::new("libc.so.6") {
                 Err(Error::DebugSourcesFailed {
+                    target: "fixture libc".to_string(),
                     errors: "fixture failure".to_string(),
                 })
             } else {
@@ -743,21 +836,29 @@ mod tests {
         let sym_path = tmp.path().join("libc-syms");
         let names = ["libc-2.36.so"];
         let sources = vec![
-            DebugSymbolSource {
-                name: "launchpad".to_string(),
-                url: format!("{}/libc6-dbg_2.36-9_amd64.deb", launchpad.base_url),
-            },
-            DebugSymbolSource {
-                name: "debian-testing".to_string(),
-                url: format!(
+            DebugSymbolSource::deb_package(
+                "launchpad",
+                format!("{}/libc6-dbg_2.36-9_amd64.deb", launchpad.base_url),
+            ),
+            DebugSymbolSource::deb_package(
+                "debian-testing",
+                format!(
                     "{}/pool/main/g/glibc/libc6-dbg_2.36-9_amd64.deb",
                     debian_testing.base_url
                 ),
-            },
+            ),
         ];
 
-        fetch_debug_symbols_with_sources(&names, &sym_path, tmp.path(), sources, fast_policy())
-            .expect("Debian testing source should satisfy debug symbol fetch");
+        fetch_debug_symbols_with_sources(
+            &names,
+            "0123456789abcdef",
+            "test libc",
+            &sym_path,
+            tmp.path(),
+            sources,
+            fast_policy(),
+        )
+        .expect("Debian testing source should satisfy debug symbol fetch");
 
         assert_eq!(
             std::fs::read(&sym_path).expect("read symbols"),
@@ -773,5 +874,69 @@ mod tests {
             1,
             "Debian testing source should be attempted"
         );
+    }
+
+    #[test]
+    fn debug_symbol_fetch_falls_back_to_debuginfod_by_full_build_id() {
+        let package = ScriptedServer::with(vec![ScriptedResponse::status(404, b"missing")]);
+        let debuginfod = ScriptedServer::with(vec![ScriptedResponse::Body(
+            b"build-id debug bytes".to_vec(),
+        )]);
+
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let sym_path = tmp.path().join("libc-syms");
+        let build_id = "0123456789abcdef0123456789abcdef01234567";
+        let sources = vec![
+            DebugSymbolSource::deb_package(
+                "debian-snapshot",
+                format!("{}/libc6-dbg.deb", package.base_url),
+            ),
+            DebugSymbolSource::debuginfod("debian-debuginfod", &debuginfod.base_url),
+        ];
+
+        fetch_debug_symbols_with_sources(
+            &[
+                "libc-2.36.so",
+                "23456789abcdef0123456789abcdef01234567.debug",
+            ],
+            build_id,
+            "test libc",
+            &sym_path,
+            tmp.path(),
+            sources,
+            fast_policy(),
+        )
+        .expect("debuginfod should satisfy the package miss");
+
+        assert_eq!(
+            std::fs::read(&sym_path).expect("read symbols"),
+            b"build-id debug bytes"
+        );
+        assert_eq!(package.recorded().len(), 1);
+        assert_eq!(
+            debuginfod.recorded(),
+            [format!("GET /buildid/{}/debuginfo HTTP/1.1", build_id)]
+        );
+    }
+
+    #[test]
+    fn debug_symbol_fetch_reports_when_no_sources_are_available() {
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let sym_path = tmp.path().join("libc-syms");
+
+        let err = fetch_debug_symbols_with_sources(
+            &["libc-2.36.so"],
+            "0123456789abcdef",
+            "test libc",
+            &sym_path,
+            tmp.path(),
+            Vec::new(),
+            fast_policy(),
+        )
+        .expect_err("an empty source set must be actionable");
+
+        assert!(err
+            .to_string()
+            .contains("no debug-symbol sources were available"));
     }
 }

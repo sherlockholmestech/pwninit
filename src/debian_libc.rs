@@ -64,8 +64,18 @@ pub(crate) fn search_snapshot_binary(
         percent_encode_path_segment(version),
     );
     let (response, _trace): (SnapshotBinaryFiles, _) =
-        http_retry::get_json(&api_url, policy, sleeper)
-            .map_err(|source| Error::Request { source })?;
+        match http_retry::get_json(&api_url, policy, sleeper) {
+            Ok(response) => response,
+            // Snapshot uses 404 to report that an exact binary/version pair
+            // is absent. That is a normal lookup miss, not a repository
+            // failure, and callers can still try live mirrors or debuginfod.
+            Err(http_retry::Error::PermanentStatus { status })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                return Ok(None);
+            }
+            Err(source) => return Err(Error::Request { source }),
+        };
     Ok(snapshot_binary_package(
         response,
         package_name,

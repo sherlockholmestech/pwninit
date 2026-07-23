@@ -92,6 +92,10 @@ pwninit pwn --debug-source launchpad
 pwninit pwn --debug-source debian
 ```
 
+If the exact debug package is unavailable, pwninit automatically falls back to
+the selected distribution's debuginfod service and looks up symbols by ELF
+build ID.
+
 Use `--no-unstrip` to skip downloading debug symbols entirely. The standalone `fetch-libc` command only downloads packaged runtime files and does not unstrip them.
 
 The command fails before changing files when no binary is found. If multiple candidate binaries, libcs, or linkers are present, specify the intended path explicitly instead of relying on directory order.
